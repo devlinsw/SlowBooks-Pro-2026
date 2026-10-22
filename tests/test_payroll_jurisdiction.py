@@ -30,6 +30,7 @@ def test_jurisdiction_is_unconfigured_until_a_company_sets_it(client):
         "effective_from": None,
         "effective_to": None,
         "regulatory_scope": "provincially_regulated",
+        "server_today": today,
         "minimum_effective_from": today,
         "history": [],
     }
@@ -353,6 +354,34 @@ def _freeze_jurisdiction_today(monkeypatch, current_date):
 
     monkeypatch.setattr(route, "date", FrozenDate)
     monkeypatch.setattr(payroll_jurisdiction_service, "date", FrozenDate)
+
+
+def test_api_returns_server_today_consistently_for_empty_and_future_history(
+    client, monkeypatch
+):
+    server_today = date(2030, 6, 15)
+    _freeze_jurisdiction_today(monkeypatch, server_today)
+
+    unconfigured = client.get("/api/settings/payroll-jurisdiction")
+    future_start = server_today + timedelta(days=20)
+    created = client.post(
+        "/api/settings/payroll-jurisdiction",
+        json=_payload("ON", future_start),
+    )
+    future_state = client.get(
+        "/api/settings/payroll-jurisdiction",
+        params={"as_of": (server_today + timedelta(days=10)).isoformat()},
+    )
+
+    assert unconfigured.status_code == 200, unconfigured.text
+    assert created.status_code == 201, created.text
+    assert future_state.status_code == 200, future_state.text
+    assert unconfigured.json()["server_today"] == server_today.isoformat()
+    assert unconfigured.json()["minimum_effective_from"] == server_today.isoformat()
+    assert future_state.json()["server_today"] == server_today.isoformat()
+    assert future_state.json()["minimum_effective_from"] == (
+        future_start + timedelta(days=1)
+    ).isoformat()
 
 
 def test_get_with_history_on_date_max_returns_no_minimum_effective_date(

@@ -308,6 +308,108 @@ def test_loan_balance_runs_down_and_stops(client, seed_accounts):
 # ---------------------------------------------------------------------------
 # Employer side: match tiers, GL mapping, remittance
 # ---------------------------------------------------------------------------
+def test_seed_standard_rejects_active_canadian_jurisdiction_without_mutation(
+    client, db_session
+):
+    from datetime import date
+
+    from app.models.accounts import Account
+    from app.models.benefits import BenefitCode
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+
+    db_session.add(
+        PayrollJurisdiction(
+            country_code="CA",
+            province_code="ON",
+            regulatory_scope="provincially_regulated",
+            effective_from=date.today(),
+        )
+    )
+    db_session.commit()
+
+    response = client.post("/api/benefits/codes/seed-standard")
+
+    assert response.status_code == 422
+    assert "Canadian" in response.json()["detail"]
+    assert db_session.query(BenefitCode).count() == 0
+    assert db_session.query(Account).count() == 0
+
+
+def test_seed_standard_without_jurisdiction_history_keeps_us_presets(
+    client, db_session
+):
+    from app.models.benefits import BenefitCode
+
+    response = client.post("/api/benefits/codes/seed-standard")
+
+    assert response.status_code == 200, response.text
+    assert {"401K", "HSA", "SEC125", "ROTH401K"} <= {
+        code["code"] for code in response.json()
+    }
+    assert db_session.query(BenefitCode).count() == len(response.json())
+
+
+def test_seed_standard_with_only_future_canadian_jurisdiction_keeps_us_presets(
+    client, db_session
+):
+    from datetime import date, timedelta
+
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+
+    db_session.add(
+        PayrollJurisdiction(
+            country_code="CA",
+            province_code="BC",
+            regulatory_scope="provincially_regulated",
+            effective_from=date.today() + timedelta(days=30),
+        )
+    )
+    db_session.commit()
+
+    response = client.post("/api/benefits/codes/seed-standard")
+
+    assert response.status_code == 200, response.text
+    assert "401K" in {code["code"] for code in response.json()}
+
+
+def test_seed_standard_rejects_ambiguous_jurisdiction_history_without_mutation(
+    client, db_session
+):
+    from datetime import date, timedelta
+
+    from app.models.accounts import Account
+    from app.models.benefits import BenefitCode
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+
+    today = date.today()
+    db_session.add_all(
+        [
+            PayrollJurisdiction(
+                country_code="CA",
+                province_code="ON",
+                regulatory_scope="provincially_regulated",
+                effective_from=today - timedelta(days=20),
+                effective_to=today - timedelta(days=10),
+            ),
+            PayrollJurisdiction(
+                country_code="CA",
+                province_code="BC",
+                regulatory_scope="provincially_regulated",
+                effective_from=today - timedelta(days=5),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    response = client.post("/api/benefits/codes/seed-standard")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"].lower()
+    assert "ambiguous" in detail or "uncovered" in detail
+    assert db_session.query(BenefitCode).count() == 0
+    assert db_session.query(Account).count() == 0
+
+
 def test_standard_401k_tiered_match(client, seed_accounts):
     codes = client.post("/api/benefits/codes/seed-standard").json()
     k = next(c for c in codes if c["code"] == "401K")
