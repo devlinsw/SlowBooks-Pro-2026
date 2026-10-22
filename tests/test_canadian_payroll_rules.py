@@ -196,3 +196,12 @@ def test_registry_cannot_be_mutated_after_validation():
 
     with pytest.raises(AttributeError):
         registry._rule_sets = ()
+
+
+def test_registry_state_cannot_be_deleted_and_resolve_remains_functional():
+    registry = PayrollRuleRegistry((make_set(),))
+
+    with pytest.raises(AttributeError):
+        del registry._rule_sets
+
+    assert registry.resolve("AB", date(2026, 4, 1)).version == "ab-demo-2026.1"

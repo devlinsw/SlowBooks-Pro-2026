@@ -196,6 +196,9 @@ class PayrollRuleRegistry:
             raise AttributeError("PayrollRuleRegistry is immutable")
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("PayrollRuleRegistry is immutable")
+
     def __init__(self, rule_sets: Iterable[PayrollRuleSet]) -> None:
         try:
             entries = tuple(rule_sets)
