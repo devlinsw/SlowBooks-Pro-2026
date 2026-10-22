@@ -37,6 +37,10 @@ from app.schemas.benefits import (
     ResolvedBenefit,
 )
 from app.services import benefits_engine as engine
+from app.services.payroll_jurisdiction_service import (
+    PayrollJurisdictionAmbiguous,
+    resolve_company_payroll_jurisdiction,
+)
 
 router = APIRouter(prefix="/api/benefits", tags=["benefits"])
 
@@ -91,8 +95,22 @@ def create_code(data: BenefitCodeCreate, db: Session = Depends(get_db)):
 
 @router.post("/codes/seed-standard", response_model=list[BenefitCodeResponse])
 def seed_standard(db: Session = Depends(get_db)):
-    """Create the common codes (Section 125, HSA, 401(k) with a tiered
-    match, Roth, union dues, loan, employer health, GTL) if missing."""
+    """Create common US-oriented benefit presets if missing."""
+    try:
+        jurisdiction = resolve_company_payroll_jurisdiction(db, date.today())
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Payroll jurisdiction history is ambiguous: {exc}",
+        ) from exc
+    if jurisdiction is not None and jurisdiction.country_code == "CA":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Standard benefit presets are not Canadian-reviewed and are "
+                "not available for Canadian companies."
+            ),
+        )
     engine.ensure_accounts(db)
     codes = engine.seed_standard_codes(db)
     db.commit()

@@ -70,6 +70,26 @@ const BenefitsPage = {
 
     async _codesTab() {
         const codes = await API.get('/benefits/codes?include_inactive=true');
+        let seedAction = '';
+        let seedNotice = '';
+        try {
+            const jurisdiction = await API.get('/settings/payroll-jurisdiction');
+            if (
+                !jurisdiction ||
+                typeof jurisdiction !== 'object' ||
+                !('country_code' in jurisdiction)
+            ) {
+                seedNotice = '<p role="alert" aria-live="assertive" style="margin:0 0 12px;">Standard benefit presets are unavailable because the payroll jurisdiction response is unsupported.</p>';
+            } else if (jurisdiction.country_code === 'CA') {
+                seedNotice = '<p role="status" aria-live="polite" style="margin:0 0 12px;">Standard benefit presets are not Canadian-reviewed and are not available for Canadian companies.</p>';
+            } else if (jurisdiction.country_code === null) {
+                seedAction = '<button class="btn btn-secondary" onclick="BenefitsPage.seedStandard()">Seed standard codes</button>';
+            } else {
+                seedNotice = '<p role="alert" aria-live="assertive" style="margin:0 0 12px;">Standard benefit presets are unavailable for this unsupported payroll jurisdiction.</p>';
+            }
+        } catch (err) {
+            seedNotice = '<p role="alert" aria-live="assertive" style="margin:0 0 12px;">Payroll jurisdiction could not be verified. Standard benefit presets are unavailable until it can be checked.</p>';
+        }
         const rows = codes.map(c => `<tr ${c.is_active ? '' : 'class="row--dim"'}>
             <td class="amount">${c.sequence}</td>
             <td><strong>${escapeHtml(c.code)}</strong><br><span style="font-size:12px;">${escapeHtml(c.name)}</span></td>
@@ -85,9 +105,10 @@ const BenefitsPage = {
             </td>
         </tr>`).join('');
         return `
+            ${seedNotice}
             <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
                 <button class="btn btn-primary" onclick="BenefitsPage.showCodeForm()">+ Add Code</button>
-                <button class="btn btn-secondary" onclick="BenefitsPage.seedStandard()">Seed standard codes</button>
+                ${seedAction}
                 <button class="btn btn-secondary" onclick="BenefitsPage.setupAccounts()">Create default accounts</button>
             </div>
             <div class="table-container"><table>
