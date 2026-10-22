@@ -43,16 +43,19 @@ def _guarded_request(client, kind, employee_id, token):
             f"/api/employees/{employee_id}",
             json={"filing_status": "married", "pay_rate": 99},
         )
+    # Keep portal commits scoped to the POST, not its follow-up GET.
     if kind == "portal-cookie":
         client.cookies.set("slowbooks_portal", token, path="/portal")
         return client.post(
             "/portal/profile",
             data={"filing_status": "married", "state": "CA", "address1": "New"},
+            follow_redirects=False,
         )
     if kind == "portal-token":
         return client.post(
             f"/portal/{token}/profile",
             data={"filing_status": "married", "state": "CA", "address1": "New"},
+            follow_redirects=False,
         )
     if kind == "pay-run":
         today = date.today().isoformat()
@@ -194,6 +197,7 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
     results = {}
     thread_errors = {}
     commit_order = []
+    commit_records = []
     first_sql_by_role = {}
 
     @event.listens_for(SessionClass, "after_begin")
@@ -224,6 +228,7 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         role = session.info.get("race_role")
         if role in {"guarded", "jurisdiction"}:
             commit_order.append(role)
+            commit_records.append((role, session.info.get("commit_stage")))
 
     original_history = payroll_jurisdiction_service._ordered_history
 
@@ -253,6 +258,23 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         "portal-token": portal_routes,
         "pay-run": run_routes,
     }[kind]
+    if kind in {"portal-cookie", "portal-token"}:
+        original_save_profile = portal_routes._save_profile
+
+        def track_profile_save_commit(*args, **kwargs):
+            db = kwargs["db"]
+            previous_stage = db.info.get("commit_stage")
+            db.info["commit_stage"] = "w4-profile-save"
+            try:
+                return original_save_profile(*args, **kwargs)
+            finally:
+                if previous_stage is None:
+                    db.info.pop("commit_stage", None)
+                else:
+                    db.info["commit_stage"] = previous_stage
+
+        monkeypatch.setattr(portal_routes, "_save_profile", track_profile_save_commit)
+
     original_resolve = route_module.resolve_company_payroll_jurisdiction
 
     def pause_after_real_resolution(db, as_of):
@@ -347,7 +369,30 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
                 "request still held the empty-history decision"
             )
             assert results["guarded"].status_code in {200, 201, 303}, results["guarded"].text
-            assert commit_order.index("guarded") < commit_order.index("jurisdiction"), commit_order
+            if kind in {"portal-cookie", "portal-token"}:
+                profile_commit_indexes = [
+                    index
+                    for index, record in enumerate(commit_records)
+                    if record == ("guarded", "w4-profile-save")
+                ]
+                assert len(profile_commit_indexes) == 1, commit_records
+                profile_commit_index = profile_commit_indexes[0]
+                last_guarded_record_index = max(
+                    index
+                    for index, (role, _stage) in enumerate(commit_records)
+                    if role == "guarded"
+                )
+                assert profile_commit_index == last_guarded_record_index, commit_records
+                assert sum(
+                    role == "guarded" and stage is None
+                    for role, stage in commit_records[:profile_commit_index]
+                ) >= 2, commit_records
+                jurisdiction_commit_index = commit_records.index(("jurisdiction", None))
+                assert profile_commit_index < jurisdiction_commit_index, commit_records
+            last_guarded_commit_index = max(
+                index for index, role in enumerate(commit_order) if role == "guarded"
+            )
+            assert last_guarded_commit_index < commit_order.index("jurisdiction"), commit_order
         else:
             assert not guarded_finished_before_activation, (
                 "guarded request completed after reading empty history while "
