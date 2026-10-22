@@ -74,22 +74,81 @@ const BenefitsPage = {
         let seedNotice = '';
         try {
             const jurisdiction = await API.get('/settings/payroll-jurisdiction');
-            const hasJurisdictionCodes = Boolean(
-                jurisdiction &&
-                typeof jurisdiction === 'object' &&
-                !Array.isArray(jurisdiction) &&
-                'country_code' in jurisdiction &&
-                'province_code' in jurisdiction &&
-                (
-                    jurisdiction.country_code === null
-                        ? jurisdiction.province_code === null
-                        : typeof jurisdiction.country_code === 'string' &&
-                          jurisdiction.country_code.trim() !== '' &&
-                          (jurisdiction.country_code !== 'CA' ||
-                           (typeof jurisdiction.province_code === 'string' && jurisdiction.province_code.trim() !== ''))
-                )
+            const requiredFields = [
+                'country_code', 'province_code', 'effective_from', 'effective_to',
+                'regulatory_scope', 'minimum_effective_from', 'history',
+            ];
+            const supportedProvinces = new Set(['AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'ON', 'PE', 'SK']);
+            const isIsoDate = value => {
+                if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith('0000')) return false;
+                const date = new Date(`${value}T00:00:00.000Z`);
+                return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+            };
+            const hasValidRange = (effectiveFrom, effectiveTo) =>
+                isIsoDate(effectiveFrom) &&
+                (effectiveTo === null || (isIsoDate(effectiveTo) && effectiveTo >= effectiveFrom));
+            const isValidHistoryEntry = entry =>
+                entry &&
+                typeof entry === 'object' &&
+                !Array.isArray(entry) &&
+                ['country_code', 'province_code', 'regulatory_scope', 'effective_from', 'effective_to']
+                    .every(field => Object.prototype.hasOwnProperty.call(entry, field)) &&
+                entry.country_code === 'CA' &&
+                supportedProvinces.has(entry.province_code) &&
+                entry.regulatory_scope === 'provincially_regulated' &&
+                hasValidRange(entry.effective_from, entry.effective_to);
+            const isValidHistory = history => {
+                if (!Array.isArray(history) || !history.every(isValidHistoryEntry)) return false;
+                if (history.length === 0) return true;
+                if (history[history.length - 1].effective_to !== null) return false;
+                return history.every((entry, index) => {
+                    if (index === 0) return true;
+                    const previous = history[index - 1];
+                    return previous.effective_to !== null &&
+                        Date.parse(`${previous.effective_to}T00:00:00.000Z`) + 86400000 ===
+                            Date.parse(`${entry.effective_from}T00:00:00.000Z`);
+                });
+            };
+            const isObjectResponse = Boolean(
+                jurisdiction && typeof jurisdiction === 'object' && !Array.isArray(jurisdiction)
             );
-            if (!hasJurisdictionCodes) {
+            const hasRequiredFields = isObjectResponse && requiredFields.every(
+                field => Object.prototype.hasOwnProperty.call(jurisdiction, field)
+            );
+            const noActiveJurisdiction = hasRequiredFields &&
+                jurisdiction.country_code === null &&
+                jurisdiction.province_code === null &&
+                jurisdiction.effective_from === null &&
+                jurisdiction.effective_to === null;
+            const activeJurisdiction = hasRequiredFields &&
+                typeof jurisdiction.country_code === 'string' &&
+                jurisdiction.country_code.trim() !== '' &&
+                supportedProvinces.has(jurisdiction.province_code) &&
+                hasValidRange(jurisdiction.effective_from, jurisdiction.effective_to);
+            const hasValidResponse = hasRequiredFields &&
+                jurisdiction.regulatory_scope === 'provincially_regulated' &&
+                (jurisdiction.minimum_effective_from === null || isIsoDate(jurisdiction.minimum_effective_from)) &&
+                isValidHistory(jurisdiction.history) &&
+                (noActiveJurisdiction || activeJurisdiction);
+            const currentDate = new Date().toISOString().slice(0, 10);
+            const activeRecordIsInHistory = hasValidResponse && jurisdiction.country_code === 'CA' &&
+                jurisdiction.history.some(entry =>
+                    entry.country_code === jurisdiction.country_code &&
+                    entry.province_code === jurisdiction.province_code &&
+                    entry.effective_from === jurisdiction.effective_from &&
+                    entry.effective_to === jurisdiction.effective_to &&
+                    entry.effective_from <= currentDate &&
+                    (entry.effective_to === null || currentDate <= entry.effective_to)
+                );
+            const hasFutureOnlyHistory = hasValidResponse && noActiveJurisdiction && jurisdiction.history.every(
+                entry => entry.effective_from > currentDate
+            );
+            const hasSupportedJurisdiction = hasValidResponse &&
+                (jurisdiction.country_code === 'CA'
+                    ? activeRecordIsInHistory
+                    : noActiveJurisdiction ? hasFutureOnlyHistory : true);
+
+            if (!hasSupportedJurisdiction) {
                 seedNotice = '<p role="alert" aria-live="assertive" style="margin:0 0 12px;">Standard benefit presets are unavailable because the payroll jurisdiction response is unsupported.</p>';
             } else if (jurisdiction.country_code === 'CA') {
                 seedNotice = '<p role="status" aria-live="polite" style="margin:0 0 12px;">Standard benefit presets are not Canadian-reviewed and are not available for Canadian companies.</p>';

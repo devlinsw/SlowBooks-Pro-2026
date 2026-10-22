@@ -22,6 +22,38 @@ const manualCode = {
     current_rate: null,
 };
 
+const today = () => new Date().toISOString().slice(0, 10);
+const addDays = (isoDate, days) => {
+    const date = new Date(`${isoDate}T00:00:00.000Z`);
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+};
+const jurisdictionScope = 'provincially_regulated';
+
+function noActiveJurisdiction(overrides = {}) {
+    return {
+        country_code: null,
+        province_code: null,
+        effective_from: null,
+        effective_to: null,
+        regulatory_scope: jurisdictionScope,
+        minimum_effective_from: today(),
+        history: [],
+        ...overrides,
+    };
+}
+
+function futureJurisdiction(overrides = {}) {
+    return {
+        country_code: 'CA',
+        province_code: 'ON',
+        regulatory_scope: jurisdictionScope,
+        effective_from: '2999-01-01',
+        effective_to: null,
+        ...overrides,
+    };
+}
+
 function fixture(jurisdiction, lookupError = null) {
     const context = {
         API: {
@@ -47,7 +79,14 @@ function fixture(jurisdiction, lookupError = null) {
 const hasSeedButton = html => /onclick="BenefitsPage\.seedStandard\(\)">Seed standard codes/.test(html);
 
 test('active Canadian jurisdiction hides US presets and gives an accessible notice', async () => {
-    const page = fixture({ country_code: 'CA', province_code: 'ON', history: [] });
+    const effectiveFrom = today();
+    const page = fixture(noActiveJurisdiction({
+        country_code: 'CA',
+        province_code: 'ON',
+        effective_from: effectiveFrom,
+        minimum_effective_from: addDays(effectiveFrom, 1),
+        history: [futureJurisdiction({ effective_from: effectiveFrom })],
+    }));
     const html = await page._codesTab();
 
     assert.equal(hasSeedButton(html), false);
@@ -59,7 +98,7 @@ test('active Canadian jurisdiction hides US presets and gives an accessible noti
 });
 
 test('no active jurisdiction preserves the US seed action and existing code list', async () => {
-    const page = fixture({ country_code: null, province_code: null, history: [] });
+    const page = fixture(noActiveJurisdiction());
     const html = await page._codesTab();
 
     assert.equal(hasSeedButton(html), true);
@@ -68,11 +107,10 @@ test('no active jurisdiction preserves the US seed action and existing code list
 });
 
 test('future-only Canadian jurisdiction preserves the US seed action', async () => {
-    const page = fixture({
-        country_code: null,
-        province_code: null,
-        history: [{ country_code: 'CA', effective_from: '2999-01-01' }],
-    });
+    const page = fixture(noActiveJurisdiction({
+        minimum_effective_from: '2999-01-02',
+        history: [futureJurisdiction()],
+    }));
 
     assert.equal(hasSeedButton(await page._codesTab()), true);
 });
@@ -89,7 +127,7 @@ test('jurisdiction lookup failure hides seeding and explains the limitation', as
 });
 
 test('null country with a non-null province fails closed without hiding manual codes', async () => {
-    const page = fixture({ country_code: null, province_code: 'ON', history: [] });
+    const page = fixture(noActiveJurisdiction({ province_code: 'ON' }));
     const html = await page._codesTab();
 
     assert.equal(hasSeedButton(html), false);
@@ -99,7 +137,9 @@ test('null country with a non-null province fails closed without hiding manual c
 });
 
 test('missing province in a null-country response fails closed', async () => {
-    const page = fixture({ country_code: null, history: [] });
+    const response = noActiveJurisdiction();
+    delete response.province_code;
+    const page = fixture(response);
     const html = await page._codesTab();
 
     assert.equal(hasSeedButton(html), false);
@@ -108,11 +148,136 @@ test('missing province in a null-country response fails closed', async () => {
 });
 
 test('unknown jurisdiction response fails closed without hiding manual codes', async () => {
-    const page = fixture({ country_code: 'ZZ', province_code: 'XX', history: [] });
+    const page = fixture(noActiveJurisdiction({
+        country_code: 'ZZ',
+        province_code: 'ON',
+        effective_from: today(),
+    }));
     const html = await page._codesTab();
 
     assert.equal(hasSeedButton(html), false);
     assert.match(html, /role="alert"/);
     assert.match(html, /unsupported payroll jurisdiction/);
     assert.match(html, /MANUAL/);
+});
+
+test('missing required payroll-jurisdiction fields fail closed', async t => {
+    for (const field of [
+        'country_code',
+        'province_code',
+        'effective_from',
+        'effective_to',
+        'regulatory_scope',
+        'minimum_effective_from',
+        'history',
+    ]) {
+        await t.test(`missing ${field}`, async () => {
+            const response = noActiveJurisdiction();
+            delete response[field];
+            const html = await fixture(response)._codesTab();
+
+            assert.equal(hasSeedButton(html), false);
+            assert.match(html, /role="alert"/);
+            assert.match(html, /payroll jurisdiction response is unsupported/);
+            assert.match(html, /MANUAL/);
+        });
+    }
+});
+
+test('null-country response with any non-null active effective date fails closed', async t => {
+    for (const [field, value] of [
+        ['effective_from', today()],
+        ['effective_to', today()],
+    ]) {
+        await t.test(`${field} is non-null`, async () => {
+            const html = await fixture(noActiveJurisdiction({ [field]: value }))._codesTab();
+
+            assert.equal(hasSeedButton(html), false);
+            assert.match(html, /role="alert"/);
+            assert.match(html, /payroll jurisdiction response is unsupported/);
+            assert.match(html, /MANUAL/);
+        });
+    }
+});
+
+test('unsupported scope and malformed top-level dates fail closed', async t => {
+    const cases = [
+        ['unsupported scope', noActiveJurisdiction({ regulatory_scope: 'federally_regulated' })],
+        ['invalid minimum date', noActiveJurisdiction({ minimum_effective_from: '2026-02-30' })],
+        ['malformed active date', noActiveJurisdiction({
+            country_code: 'CA',
+            province_code: 'ON',
+            effective_from: '2026-02-30',
+            history: [futureJurisdiction()],
+        })],
+        ['active record missing from history', noActiveJurisdiction({
+            country_code: 'CA',
+            province_code: 'ON',
+            effective_from: today(),
+        })],
+        ['inverted active date range', noActiveJurisdiction({
+            country_code: 'CA',
+            province_code: 'ON',
+            effective_from: '2026-02-02',
+            effective_to: '2026-02-01',
+            history: [futureJurisdiction({ effective_from: '2026-02-02', effective_to: '2026-02-01' })],
+        })],
+    ];
+
+    for (const [name, response] of cases) {
+        await t.test(name, async () => {
+            const html = await fixture(response)._codesTab();
+
+            assert.equal(hasSeedButton(html), false);
+            assert.match(html, /role="alert"/);
+            assert.match(html, /payroll jurisdiction response is unsupported/);
+            assert.match(html, /MANUAL/);
+        });
+    }
+});
+
+test('malformed history containers and entries fail closed', async t => {
+    const cases = [
+        ['non-array history', noActiveJurisdiction({ history: {} })],
+        ['entry missing a required field', noActiveJurisdiction({ history: [{ country_code: 'CA' }] })],
+        ['unsupported history province', noActiveJurisdiction({
+            history: [futureJurisdiction({ province_code: 'YT' })],
+        })],
+        ['invalid history date', noActiveJurisdiction({
+            history: [futureJurisdiction({ effective_from: '2999-02-30' })],
+        })],
+        ['inverted history date range', noActiveJurisdiction({
+            history: [futureJurisdiction({ effective_to: '2998-12-31' })],
+        })],
+        ['non-contiguous history ranges', noActiveJurisdiction({
+            history: [
+                futureJurisdiction({ effective_to: '2999-01-02' }),
+                futureJurisdiction({ effective_from: '2999-01-04' }),
+            ],
+        })],
+        ['unsorted history ranges', noActiveJurisdiction({
+            history: [
+                futureJurisdiction({ effective_from: '2999-01-03' }),
+                futureJurisdiction({ effective_from: '2999-01-01' }),
+            ],
+        })],
+        ['history with no open-ended final range', noActiveJurisdiction({
+            history: [futureJurisdiction({ effective_to: '2999-01-02' })],
+        })],
+        ['no-active response with a currently effective history record', noActiveJurisdiction({
+            minimum_effective_from: addDays(today(), 1),
+            history: [futureJurisdiction({ effective_from: today() })],
+        })],
+    ];
+
+    for (const [name, response] of cases) {
+        await t.test(name, async () => {
+            const html = await fixture(response)._codesTab();
+
+            assert.equal(hasSeedButton(html), false);
+            assert.match(html, /role="alert"/);
+            assert.match(html, /payroll jurisdiction response is unsupported/);
+            assert.match(html, /MANUAL/);
+        });
+    }
 });
