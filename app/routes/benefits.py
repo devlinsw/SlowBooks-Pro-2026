@@ -39,6 +39,7 @@ from app.schemas.benefits import (
 from app.services import benefits_engine as engine
 from app.services.payroll_jurisdiction_service import (
     PayrollJurisdictionAmbiguous,
+    lock_company_payroll_jurisdiction,
     resolve_company_payroll_jurisdiction,
 )
 
@@ -96,6 +97,13 @@ def create_code(data: BenefitCodeCreate, db: Session = Depends(get_db)):
 @router.post("/codes/seed-standard", response_model=list[BenefitCodeResponse])
 def seed_standard(db: Session = Depends(get_db)):
     """Create common US-oriented benefit presets if missing."""
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; standard benefit preset seeding is blocked.",
+        ) from exc
     try:
         jurisdiction = resolve_company_payroll_jurisdiction(db, date.today())
     except PayrollJurisdictionAmbiguous as exc:
