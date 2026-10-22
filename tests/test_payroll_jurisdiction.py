@@ -806,6 +806,7 @@ def test_simultaneous_initial_posts_preserve_one_consistent_timeline(
     from app.database import get_db
     from app.main import app
     from app.models.payroll_jurisdiction import PayrollJurisdiction
+    from app.routes import payroll_jurisdiction as jurisdiction_routes
     from app.services import payroll_jurisdiction_service
 
     engine = create_engine(
@@ -824,7 +825,7 @@ def test_simultaneous_initial_posts_preserve_one_consistent_timeline(
 
     previous_override = app.dependency_overrides.get(get_db)
     app.dependency_overrides[get_db] = file_backed_db
-    initial_reads = Barrier(2)
+    service_entry = Barrier(2)
     result_lock = Lock()
     responses = []
     worker_errors = []
@@ -837,13 +838,24 @@ def test_simultaneous_initial_posts_preserve_one_consistent_timeline(
         if lock:
             with result_lock:
                 initial_history_reads += 1
-            initial_reads.wait(timeout=10)
         return history
 
     monkeypatch.setattr(
         payroll_jurisdiction_service,
         "_ordered_history",
         ordered_history_after_both_initial_reads,
+    )
+
+    original_add = jurisdiction_routes.add_company_payroll_jurisdiction
+
+    def add_after_both_posts_enter_service(db, **kwargs):
+        service_entry.wait(timeout=10)
+        return original_add(db, **kwargs)
+
+    monkeypatch.setattr(
+        jurisdiction_routes,
+        "add_company_payroll_jurisdiction",
+        add_after_both_posts_enter_service,
     )
 
     def post_initial_jurisdiction(province):
@@ -919,7 +931,7 @@ def test_simultaneous_initial_posts_preserve_one_consistent_timeline(
         assert history["effective_from"] == stored_snapshot["effective_from"]
         assert history["effective_to"] is None
     finally:
-        initial_reads.abort()
+        service_entry.abort()
         for thread in threads:
             if thread.ident is not None:
                 thread.join(timeout=15)

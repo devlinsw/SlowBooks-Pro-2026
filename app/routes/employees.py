@@ -52,6 +52,7 @@ from app.services.payroll_jurisdiction_service import (
     SUPPORTED_COUNTRY,
     SUPPORTED_PROVINCES,
     SUPPORTED_SCOPE,
+    lock_company_payroll_jurisdiction,
     resolve_company_payroll_jurisdiction,
 )
 from app.services.onboarding import seed_onboarding_tasks
@@ -203,8 +204,19 @@ _CANADIAN_EMPLOYEE_SETUP_UNAVAILABLE = (
 )
 
 
+def _lock_employee_profile_jurisdiction(db: Session) -> None:
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; employee profile changes are blocked.",
+        ) from exc
+
+
 def _current_employee_jurisdiction_is_canadian(db: Session) -> bool:
     """Resolve today's company jurisdiction, failing closed on uncertain history."""
+    _lock_employee_profile_jurisdiction(db)
     try:
         jurisdiction = resolve_company_payroll_jurisdiction(db, date.today())
     except PayrollJurisdictionAmbiguous as exc:
@@ -255,6 +267,7 @@ def create_employee(data: EmployeeCreate, db: Session = Depends(get_db)):
 
 @router.put("/{emp_id}", response_model=EmployeeResponse)
 def update_employee(emp_id: int, data: EmployeeUpdate, db: Session = Depends(get_db)):
+    _lock_employee_profile_jurisdiction(db)
     emp = db.query(Employee).filter(Employee.id == emp_id).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")

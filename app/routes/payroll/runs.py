@@ -36,6 +36,7 @@ from app.services.gross_up import gross_up
 from app.services.state_tax.reciprocity import withholding_state
 from app.services.payroll_jurisdiction_service import (
     PayrollJurisdictionAmbiguous,
+    lock_company_payroll_jurisdiction,
     resolve_company_payroll_jurisdiction,
 )
 from app.services import benefits_engine
@@ -173,6 +174,13 @@ def create_pay_run(data: PayRunCreate, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=400, detail=f"Invalid run_type: {data.run_type}"
         )
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; pay-run creation is blocked.",
+        ) from exc
     try:
         jurisdiction = resolve_company_payroll_jurisdiction(db, data.pay_date)
     except PayrollJurisdictionAmbiguous as exc:
