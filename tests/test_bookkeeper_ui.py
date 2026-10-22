@@ -233,6 +233,7 @@ SETTINGS_TAKEN_FROM_A_SIGN_IN = {
     ),
 }
 SETTINGS_TAKEN_PARTS = {
+    "Payroll Jurisdiction › #payroll-jurisdiction-scope": "Payroll Jurisdiction › Set / schedule province",
     "Payroll Jurisdiction › #payroll-jurisdiction-province": "Payroll Jurisdiction › Set / schedule province",
     "Payroll Jurisdiction › #payroll-jurisdiction-effective-from": "Payroll Jurisdiction › Set / schedule province",
     "AI Insights › #ai-settings-provider": "AI Insights › Save AI settings",

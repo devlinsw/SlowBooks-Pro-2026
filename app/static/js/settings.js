@@ -95,15 +95,10 @@ const SettingsPage = {
             const state = await API.get('/settings/payroll-jurisdiction');
             target.innerHTML = SettingsPage._payrollJurisdictionMarkup(state);
             const effectiveFrom = document.getElementById('payroll-jurisdiction-effective-from');
-            if (effectiveFrom) {
-                const latest = (state.history || []).slice(-1)[0];
-                let minimum = new Date();
-                if (latest) minimum = new Date(`${latest.effective_from}T00:00:00Z`);
-                minimum.setUTCDate(minimum.getUTCDate() + (latest ? 1 : 0));
-                const minDate = minimum.toISOString().slice(0, 10);
-                effectiveFrom.min = minDate;
-                if (!effectiveFrom.value || effectiveFrom.value < minDate) {
-                    effectiveFrom.value = minDate;
+            if (effectiveFrom && state.minimum_effective_from) {
+                effectiveFrom.min = state.minimum_effective_from;
+                if (!effectiveFrom.value || effectiveFrom.value < state.minimum_effective_from) {
+                    effectiveFrom.value = state.minimum_effective_from;
                 }
             }
         } catch (e) { /* a pre-upgrade server leaves the section's first read */ }
@@ -112,12 +107,30 @@ const SettingsPage = {
     async savePayrollJurisdiction() {
         const provinceInput = document.getElementById('payroll-jurisdiction-province');
         const effectiveFromInput = document.getElementById('payroll-jurisdiction-effective-from');
+        const scopeInput = document.getElementById('payroll-jurisdiction-scope');
         const status = document.getElementById('payroll-jurisdiction-save-status');
-        if (!provinceInput || !effectiveFromInput || !status) return;
+        if (!provinceInput || !effectiveFromInput || !scopeInput || !status) return;
         const province = provinceInput.value;
         const effectiveFrom = effectiveFromInput.value;
+        const regulatoryScope = scopeInput.value;
+        if (!regulatoryScope) {
+            status.textContent = 'Choose the workplace regulation classification.';
+            return;
+        }
+        if (regulatoryScope === 'federally_regulated') {
+            status.textContent = 'Federal payroll is not supported; only provincially regulated workplaces can be configured.';
+            return;
+        }
+        if (regulatoryScope !== 'provincially_regulated') {
+            status.textContent = 'Choose a supported workplace regulation classification.';
+            return;
+        }
         if (!province || !effectiveFrom) {
             status.textContent = 'Choose a province and effective date.';
+            return;
+        }
+        if (effectiveFromInput.min && effectiveFrom < effectiveFromInput.min) {
+            status.textContent = `Effective date must be ${effectiveFromInput.min} or later.`;
             return;
         }
         status.textContent = 'Saving…';
@@ -126,7 +139,7 @@ const SettingsPage = {
                 country_code: 'CA',
                 province_code: province,
                 effective_from: effectiveFrom,
-                regulatory_scope: 'provincially_regulated',
+                regulatory_scope: regulatoryScope,
             });
             status.textContent = `${result.province_code} saved effective ${result.effective_from}.`;
             await SettingsPage.loadPayrollJurisdiction();
@@ -667,13 +680,20 @@ const SettingsPage = {
                 <div class="form-grid" style="align-items:end;">
                     <div class="form-group"><label for="payroll-jurisdiction-country">Country</label>
                         <select id="payroll-jurisdiction-country" data-admin disabled><option value="CA" selected>Canada (CA)</option></select></div>
+                    <div class="form-group"><label for="payroll-jurisdiction-scope">Workplace regulation</label>
+                        <select id="payroll-jurisdiction-scope" data-admin required>
+                            <option value="">Choose classification</option>
+                            <option value="provincially_regulated">Provincially regulated (supported)</option>
+                            <option value="federally_regulated">Federally regulated (not supported)</option>
+                        </select>
+                        <small style="color:var(--text-muted);">Federal payroll is not supported.</small></div>
                     <div class="form-group"><label for="payroll-jurisdiction-province">Payroll province</label>
                         <select id="payroll-jurisdiction-province" data-admin>
                             <option value="">Choose province</option>
                             ${['AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'ON', 'PE', 'SK'].map(code => `<option value="${code}">${code}</option>`).join('')}
                         </select></div>
                     <div class="form-group"><label for="payroll-jurisdiction-effective-from">Effective from</label>
-                        <input id="payroll-jurisdiction-effective-from" data-admin type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
+                        <input id="payroll-jurisdiction-effective-from" data-admin type="date" required min="${escapeHtml(jurisdiction.minimum_effective_from || '')}" value="${escapeHtml(jurisdiction.minimum_effective_from || '')}"></div>
                 </div>
                 <div class="form-actions" style="align-items:center;">
                     <button type="button" class="btn btn-primary" data-admin data-write onclick="SettingsPage.savePayrollJurisdiction()">Set / schedule province</button>
