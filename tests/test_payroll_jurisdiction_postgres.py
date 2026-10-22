@@ -23,17 +23,59 @@ from app.services.payroll_jurisdiction_service import (
 )
 
 
+_POSTGRES_RACE_ROUTING_QUERY_KEYS = {
+    "host",
+    "hostaddr",
+    "port",
+    "service",
+    "servicefile",
+    "target_session_attrs",
+    "load_balance_hosts",
+}
+_POSTGRES_RACE_ROUTING_ENV = (
+    "PGHOST",
+    "PGHOSTADDR",
+    "PGPORT",
+    "PGSERVICE",
+    "PGSERVICEFILE",
+    "PGTARGETSESSIONATTRS",
+    "PGLOADBALANCEHOSTS",
+)
+_POSTGRES_RACE_LOOPBACK_ERROR = (
+    "PostgreSQL race tests require a direct loopback connection"
+)
+
+
+def _validate_postgres_race_database_url(database_url):
+    try:
+        url = make_url(database_url)
+    except Exception:
+        raise ValueError(_POSTGRES_RACE_LOOPBACK_ERROR) from None
+
+    if not url.drivername.startswith("postgresql"):
+        pytest.fail("SLOWBOOKS_TEST_POSTGRES_URL must use PostgreSQL")
+
+    has_routing_query = any(
+        key.lower() in _POSTGRES_RACE_ROUTING_QUERY_KEYS for key in url.query
+    )
+    has_routing_environment = any(
+        os.environ.get(name) for name in _POSTGRES_RACE_ROUTING_ENV
+    )
+    if (
+        url.host not in {"localhost", "127.0.0.1", "::1"}
+        or has_routing_query
+        or has_routing_environment
+    ):
+        raise ValueError(_POSTGRES_RACE_LOOPBACK_ERROR)
+
+
 @pytest.mark.skipif(
     not os.getenv("SLOWBOOKS_TEST_POSTGRES_URL"),
     reason="requires an explicit disposable PostgreSQL test URL",
 )
 def test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypatch):
     database_url = os.environ["SLOWBOOKS_TEST_POSTGRES_URL"]
-    url = make_url(database_url)
-    if not url.drivername.startswith("postgresql"):
-        pytest.fail("SLOWBOOKS_TEST_POSTGRES_URL must use PostgreSQL")
-    if url.host not in {"localhost", "127.0.0.1", "::1"}:
-        pytest.fail("PostgreSQL concurrency test is restricted to loopback hosts")
+    _validate_postgres_race_database_url(database_url)
 
     schema = f"slowbooks_jurisdiction_test_{uuid.uuid4().hex}"
     admin_engine = create_engine(database_url, pool_pre_ping=True)
@@ -207,6 +249,9 @@ def test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypat
 )
 def test_benefit_seed_waits_for_initial_jurisdiction_activation(monkeypatch, client):
     """The seed route waits on PostgreSQL's table lock and re-reads Canada."""
+    database_url = os.environ["SLOWBOOKS_TEST_POSTGRES_URL"]
+    _validate_postgres_race_database_url(database_url)
+
     from fastapi.testclient import TestClient
     from starlette.requests import HTTPConnection
 
@@ -256,13 +301,6 @@ def test_benefit_seed_waits_for_initial_jurisdiction_activation(monkeypatch, cli
     from app.routes import benefits as benefit_routes
     from app.services import payroll_jurisdiction_service
     from sqlalchemy.orm import Session as SessionClass
-
-    database_url = os.environ["SLOWBOOKS_TEST_POSTGRES_URL"]
-    url = make_url(database_url)
-    if not url.drivername.startswith("postgresql"):
-        pytest.fail("SLOWBOOKS_TEST_POSTGRES_URL must use PostgreSQL")
-    if url.host not in {"localhost", "127.0.0.1", "::1"}:
-        pytest.fail("PostgreSQL concurrency test is restricted to loopback hosts")
 
     schema = f"slowbooks_benefit_seed_test_{uuid.uuid4().hex}"
     admin_engine = create_engine(database_url, pool_pre_ping=True)
@@ -478,3 +516,98 @@ def test_benefit_seed_waits_for_initial_jurisdiction_activation(monkeypatch, cli
             with admin_engine.begin() as connection:
                 connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         admin_engine.dispose()
+
+
+def _patch_race_test_environment(monkeypatch, database_url, routing_overrides=None):
+    import sys
+    from types import SimpleNamespace
+
+    module = sys.modules[__name__]
+    environment = {"SLOWBOOKS_TEST_POSTGRES_URL": database_url}
+    environment.update(routing_overrides or {})
+    monkeypatch.setattr(module, "os", SimpleNamespace(environ=environment))
+
+    engine_calls = []
+
+    def refuse_engine_creation(*_args, **_kwargs):
+        engine_calls.append(True)
+        raise AssertionError("race-test preflight reached create_engine")
+
+    monkeypatch.setattr(module, "create_engine", refuse_engine_creation)
+    return engine_calls
+
+
+@pytest.mark.parametrize(
+    ("database_url", "routing_overrides"),
+    [
+        (
+            "postgresql://test-user:test-password@localhost/test-db?hostaddr=203.0.113.8",
+            {},
+        ),
+        ("postgresql://localhost/test-db?service=remote-service", {}),
+        ("postgresql://localhost/test-db?servicefile=%2Ftmp%2Fremote-service.conf", {}),
+        ("postgresql://localhost/test-db", {"PGHOSTADDR": "203.0.113.8"}),
+        ("postgresql://localhost/test-db", {"PGSERVICE": "remote-service"}),
+        (
+            "postgresql://localhost/test-db",
+            {"PGSERVICEFILE": "/tmp/remote-service.conf"},
+        ),
+        ("postgresql://localhost/test-db", {"PGHOST": "remote.example.invalid"}),
+    ],
+    ids=[
+        "hostaddr-query",
+        "service-query",
+        "servicefile-query",
+        "pghostaddr-environment",
+        "pgservice-environment",
+        "pgservicefile-environment",
+        "pghost-environment",
+    ],
+)
+def test_schedule_race_preflight_rejects_routing_overrides(
+    monkeypatch, database_url, routing_overrides
+):
+    engine_calls = _patch_race_test_environment(
+        monkeypatch, database_url, routing_overrides
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^PostgreSQL race tests require a direct loopback connection$",
+    ) as error:
+        test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypatch)
+
+    assert str(error.value) == (
+        "PostgreSQL race tests require a direct loopback connection"
+    )
+    assert engine_calls == []
+
+
+def test_benefit_seed_race_preflight_rejects_routing_overrides(monkeypatch):
+    engine_calls = _patch_race_test_environment(
+        monkeypatch,
+        "postgresql://localhost/test-db?hostaddr=203.0.113.8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^PostgreSQL race tests require a direct loopback connection$",
+    ):
+        test_benefit_seed_waits_for_initial_jurisdiction_activation(
+            monkeypatch, client=None
+        )
+
+    assert engine_calls == []
+
+
+def test_schedule_race_preflight_accepts_direct_loopback_url(monkeypatch):
+    engine_calls = _patch_race_test_environment(
+        monkeypatch, "postgresql://localhost/test-db"
+    )
+
+    with pytest.raises(
+        AssertionError, match="^race-test preflight reached create_engine$"
+    ):
+        test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypatch)
+
+    assert engine_calls == [True]
