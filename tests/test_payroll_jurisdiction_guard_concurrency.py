@@ -57,6 +57,8 @@ def _guarded_request(client, kind, employee_id, token):
             data={"filing_status": "married", "state": "CA", "address1": "New"},
             follow_redirects=False,
         )
+    if kind == "benefit-seed":
+        return client.post("/api/benefits/codes/seed-standard")
     if kind == "pay-run":
         today = date.today().isoformat()
         return client.post(
@@ -80,7 +82,14 @@ def _guarded_request(client, kind, employee_id, token):
 
 @pytest.mark.parametrize(
     "kind",
-    ["admin-create", "admin-update", "portal-cookie", "portal-token", "pay-run"],
+    [
+        "admin-create",
+        "admin-update",
+        "portal-cookie",
+        "portal-token",
+        "pay-run",
+        "benefit-seed",
+    ],
 )
 @pytest.mark.parametrize("winner", ["guarded", "jurisdiction"])
 def test_guarded_write_and_initial_jurisdiction_activation_serialize(
@@ -89,10 +98,12 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
     """Each real guarded route must serialize against empty-history activation.
 
     If the guarded route wins, it commits before activation. If activation wins,
-    the route sees Canada and refuses before employee/profile/pay-run writes.
+    the route sees Canada and refuses before guarded writes.
     """
     from app.database import Base, get_db, enable_sqlite_tuning
     from app.main import app
+    from app.models.accounts import Account
+    from app.models.benefits import BenefitCode
     from app.models.payroll import Employee, FilingStatus, PayRun, PayStub
     from app.models.payroll_jurisdiction import PayrollJurisdiction
     from app.models.portal_access import PortalAccess
@@ -137,6 +148,7 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         vendor_credits,
     )
 
+    from app.routes import benefits as benefit_routes
     from app.routes import employees as employee_routes
     from app.routes import payroll_jurisdiction as jurisdiction_routes
     from app.routes import portal as portal_routes
@@ -257,6 +269,7 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         "portal-cookie": portal_routes,
         "portal-token": portal_routes,
         "pay-run": run_routes,
+        "benefit-seed": benefit_routes,
     }[kind]
     if kind in {"portal-cookie", "portal-token"}:
         original_save_profile = portal_routes._save_profile
@@ -359,12 +372,13 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         assert thread_errors == {}, f"request threads failed: {thread_errors!r}"
         assert set(results) == {"guarded", "jurisdiction"}
         assert results["jurisdiction"].status_code == 201, results["jurisdiction"].text
-        assert first_sql_by_role["guarded"].upper().startswith(
-            "UPDATE COMPANY_PAYROLL_JURISDICTIONS"
-        ), first_sql_by_role
-        assert first_sql_by_role["jurisdiction"].upper().startswith(
-            "UPDATE COMPANY_PAYROLL_JURISDICTIONS"
-        ), first_sql_by_role
+        if kind != "benefit-seed":
+            assert first_sql_by_role["guarded"].upper().startswith(
+                "UPDATE COMPANY_PAYROLL_JURISDICTIONS"
+            ), first_sql_by_role
+            assert first_sql_by_role["jurisdiction"].upper().startswith(
+                "UPDATE COMPANY_PAYROLL_JURISDICTIONS"
+            ), first_sql_by_role
 
         if winner == "guarded":
             assert not writer_finished_before_guard, (
@@ -436,6 +450,9 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
                 elif kind == "pay-run":
                     assert verify.query(PayRun).count() == 0
                     assert verify.query(PayStub).count() == 0
+                elif kind == "benefit-seed":
+                    assert verify.query(Account).count() == 0
+                    assert verify.query(BenefitCode).count() == 0
             else:
                 if kind == "admin-create":
                     stored = verify.query(Employee).filter(Employee.id != employee_id).one()
@@ -453,6 +470,16 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
                     run = verify.query(PayRun).one()
                     assert run.jurisdiction_snapshot is None
                     assert verify.query(PayStub).count() == 1
+                elif kind == "benefit-seed":
+                    assert verify.query(Account).count() == 4
+                    assert verify.query(BenefitCode).count() == 9
+        if kind == "benefit-seed":
+            assert first_sql_by_role["guarded"].upper().startswith(
+                "UPDATE COMPANY_PAYROLL_JURISDICTIONS"
+            ), first_sql_by_role
+            assert first_sql_by_role["jurisdiction"].upper().startswith(
+                "UPDATE COMPANY_PAYROLL_JURISDICTIONS"
+            ), first_sql_by_role
     finally:
         release_profile.set()
         release_writer.set()
@@ -478,6 +505,7 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         "portal-cookie",
         "portal-token",
         "pay-run",
+        "benefit-seed",
         "jurisdiction-writer",
     ],
 )
@@ -496,6 +524,8 @@ def test_jurisdiction_lock_failure_fails_closed_before_mutation(
     from app.database import Base, get_db, enable_sqlite_tuning
     from app.main import app
     from app.models.hr import OnboardingTask
+    from app.models.accounts import Account
+    from app.models.benefits import BenefitCode
     from app.models.payroll import Employee, FilingStatus, PayRun, PayStub
     from app.models.payroll_jurisdiction import PayrollJurisdiction
     from app.models.portal_access import PortalAccess
@@ -570,6 +600,9 @@ def test_jurisdiction_lock_failure_fails_closed_before_mutation(
             elif kind == "pay-run":
                 assert verify.query(PayRun).count() == 0
                 assert verify.query(PayStub).count() == 0
+            elif kind == "benefit-seed":
+                assert verify.query(Account).count() == 0
+                assert verify.query(BenefitCode).count() == 0
     finally:
         event.remove(engine, "before_cursor_execute", fail_guard_lock)
         if previous_override is None:
