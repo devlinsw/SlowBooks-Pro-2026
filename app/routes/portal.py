@@ -204,6 +204,7 @@ def _record_portal_access(
     success: bool,
     *,
     commit: bool = True,
+    fail_closed: bool = False,
 ) -> None:
     """Insert one portal_accesses row.
 
@@ -227,12 +228,21 @@ def _record_portal_access(
     except Exception:
         if commit:
             db.rollback()
+            if fail_closed:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Portal access could not be recorded; profile changes were not saved.",
+                ) from None
         else:
             raise
 
 
 def _employee_from_cookie(
-    request: Request, db: Session, *, commit: bool = True
+    request: Request,
+    db: Session,
+    *,
+    commit: bool = True,
+    audit_required: bool = False,
 ) -> Employee:
     """Resolve the employee from the portal cookie, or 401 if absent / invalid.
 
@@ -251,7 +261,14 @@ def _employee_from_cookie(
     except HTTPException:
         _record_portal_access(db, request, employee_id=None, success=False)
         raise
-    _record_portal_access(db, request, employee_id=emp.id, success=True, commit=commit)
+    _record_portal_access(
+        db,
+        request,
+        employee_id=emp.id,
+        success=True,
+        commit=commit,
+        fail_closed=audit_required,
+    )
     return emp
 
 
@@ -517,7 +534,7 @@ def portal_profile_save(
     db: Session = Depends(get_db),
 ):
     _lock_us_employee_profile(db)
-    emp = _employee_from_cookie(request, db)
+    emp = _employee_from_cookie(request, db, audit_required=True)
     _guard_us_employee_profile(db)
     _save_profile(
         emp,
@@ -764,7 +781,12 @@ def portal_claim_pto(request: Request, token: str, db: Session = Depends(get_db)
 # redirect to the cookieless URL. Browsers can't redirect a POST across paths
 # cleanly, so we do the work first and 303 to the GET equivalent.
 def _employee_from_token(
-    request: Request, token: str, db: Session, *, commit: bool = True
+    request: Request,
+    token: str,
+    db: Session,
+    *,
+    commit: bool = True,
+    audit_required: bool = False,
 ) -> Employee:
     """_get_employee + portal_accesses audit row, mirroring the cookie path.
 
@@ -776,7 +798,14 @@ def _employee_from_token(
     except HTTPException:
         _record_portal_access(db, request, employee_id=None, success=False)
         raise
-    _record_portal_access(db, request, employee_id=emp.id, success=True, commit=commit)
+    _record_portal_access(
+        db,
+        request,
+        employee_id=emp.id,
+        success=True,
+        commit=commit,
+        fail_closed=audit_required,
+    )
     return emp
 
 
@@ -808,7 +837,7 @@ def portal_claim_profile_save(
     db: Session = Depends(get_db),
 ):
     _lock_us_employee_profile(db)
-    emp = _employee_from_token(request, token, db)
+    emp = _employee_from_token(request, token, db, audit_required=True)
     _guard_us_employee_profile(db)
     _save_profile(
         emp,
