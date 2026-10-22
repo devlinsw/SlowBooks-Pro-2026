@@ -34,6 +34,13 @@ from app.routes.pto import cancel_pto_request
 from app.services import file_store
 from app.services.encryption import encrypt
 from app.services.nacha_export import validate_routing_number
+from app.services.payroll_jurisdiction_service import (
+    PayrollJurisdictionAmbiguous,
+    SUPPORTED_COUNTRY,
+    SUPPORTED_PROVINCES,
+    SUPPORTED_SCOPE,
+    resolve_company_payroll_jurisdiction,
+)
 from app.services.rate_limit import limiter
 from app.services.request_utils import client_ip as _client_ip
 from app.services.settings_service import get_all_settings
@@ -247,6 +254,46 @@ def _processed_stub_count(emp: Employee) -> int:
 # ---------------------------------------------------------------------------
 
 
+_CANADIAN_PROFILE_UNAVAILABLE = (
+    "Canadian employee setup is unavailable. Do not enter US W-4, state, or "
+    "Social Security data. Canadian tax setup is not provided here."
+)
+
+
+def _employee_profile_jurisdiction(db: Session) -> str:
+    """Return us/canada for today's jurisdiction; reject uncertain history."""
+    try:
+        jurisdiction = resolve_company_payroll_jurisdiction(db, date.today())
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll jurisdiction could not be confirmed because its history is ambiguous.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; the US profile is blocked.",
+        ) from exc
+
+    if jurisdiction is None:
+        return "us"
+    if (
+        jurisdiction.country_code != SUPPORTED_COUNTRY
+        or jurisdiction.province_code not in SUPPORTED_PROVINCES
+        or jurisdiction.regulatory_scope != SUPPORTED_SCOPE
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll jurisdiction could not be confirmed because its history is invalid.",
+        )
+    return "canada"
+
+
+def _guard_us_employee_profile(db: Session) -> None:
+    if _employee_profile_jurisdiction(db) == "canada":
+        raise HTTPException(status_code=422, detail=_CANADIAN_PROFILE_UNAVAILABLE)
+
+
 def _save_profile(
     emp: Employee,
     *,
@@ -408,12 +455,18 @@ def portal_paystubs(request: Request, db: Session = Depends(get_db)):
 @limiter.limit("30/minute")
 def portal_profile(request: Request, saved: int = 0, db: Session = Depends(get_db)):
     emp = _employee_from_cookie(request, db)
+    try:
+        profile_jurisdiction = _employee_profile_jurisdiction(db)
+    except HTTPException:
+        db.rollback()
+        profile_jurisdiction = "unavailable"
     return _render(
         "profile.html",
         db,
         emp=emp,
         filing_statuses=list(FilingStatus),
         saved=saved,
+        profile_jurisdiction=profile_jurisdiction,
     )
 
 
@@ -435,6 +488,7 @@ def portal_profile_save(
     db: Session = Depends(get_db),
 ):
     emp = _employee_from_cookie(request, db)
+    _guard_us_employee_profile(db)
     _save_profile(
         emp,
         filing_status=filing_status,
@@ -722,6 +776,7 @@ def portal_claim_profile_save(
     db: Session = Depends(get_db),
 ):
     emp = _employee_from_token(request, token, db)
+    _guard_us_employee_profile(db)
     _save_profile(
         emp,
         filing_status=filing_status,

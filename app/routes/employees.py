@@ -47,6 +47,13 @@ from app.schemas.payroll import (
 from app.services import file_store
 from app.services.encryption import encrypt
 from app.services.nacha_export import validate_routing_number
+from app.services.payroll_jurisdiction_service import (
+    PayrollJurisdictionAmbiguous,
+    SUPPORTED_COUNTRY,
+    SUPPORTED_PROVINCES,
+    SUPPORTED_SCOPE,
+    resolve_company_payroll_jurisdiction,
+)
 from app.services.onboarding import seed_onboarding_tasks
 from app.services.state_tax import is_supported as state_is_supported
 from app.services.upload_limits import read_limited
@@ -190,8 +197,51 @@ def _clean_employee_fields(fields: dict) -> dict:
     return fields
 
 
+_CANADIAN_EMPLOYEE_SETUP_UNAVAILABLE = (
+    "Canadian employee setup is unavailable. Do not enter US W-4, state, or "
+    "Social Security data. Canadian tax setup is not provided here."
+)
+
+
+def _current_employee_jurisdiction_is_canadian(db: Session) -> bool:
+    """Resolve today's company jurisdiction, failing closed on uncertain history."""
+    try:
+        jurisdiction = resolve_company_payroll_jurisdiction(db, date.today())
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll jurisdiction history is ambiguous; employee profile changes are blocked.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; employee profile changes are blocked.",
+        ) from exc
+
+    if jurisdiction is None:
+        return False
+    if (
+        jurisdiction.country_code != SUPPORTED_COUNTRY
+        or jurisdiction.province_code not in SUPPORTED_PROVINCES
+        or jurisdiction.regulatory_scope != SUPPORTED_SCOPE
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll jurisdiction history is invalid; employee profile changes are blocked.",
+        )
+    return True
+
+
+def _guard_legacy_employee_profile(db: Session) -> None:
+    if _current_employee_jurisdiction_is_canadian(db):
+        raise HTTPException(
+            status_code=422, detail=_CANADIAN_EMPLOYEE_SETUP_UNAVAILABLE
+        )
+
+
 @router.post("", response_model=EmployeeResponse, status_code=201)
 def create_employee(data: EmployeeCreate, db: Session = Depends(get_db)):
+    _guard_legacy_employee_profile(db)
     emp = Employee(**_clean_employee_fields(data.model_dump()))
     # Every new hire gets a self-service portal token and an onboarding checklist.
     _mint_portal_token(emp)
@@ -208,6 +258,7 @@ def update_employee(emp_id: int, data: EmployeeUpdate, db: Session = Depends(get
     emp = db.query(Employee).filter(Employee.id == emp_id).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
+    _guard_legacy_employee_profile(db)
     for key, val in _clean_employee_fields(data.model_dump(exclude_unset=True)).items():
         setattr(emp, key, val)
     db.commit()
