@@ -5,12 +5,14 @@ const source = fs.readFileSync('app/static/js/settings.js', 'utf8');
 const scope = { value: 'federally_regulated' };
 const province = { value: 'BC' };
 const effectiveFrom = { value: '2030-01-01', min: '' };
+const saveButton = { disabled: false };
 const history = { innerHTML: '' };
 const status = { textContent: '' };
 const elements = {
   'payroll-jurisdiction-scope': scope,
   'payroll-jurisdiction-province': province,
   'payroll-jurisdiction-effective-from': effectiveFrom,
+  'payroll-jurisdiction-save': saveButton,
   'payroll-jurisdiction-history': history,
   'payroll-jurisdiction-save-status': status,
 };
@@ -65,6 +67,17 @@ vm.runInContext(`${source}\nthis.SettingsPage = SettingsPage;`, context);
     source.lastIndexOf('<input ', effectiveFieldId),
     source.indexOf('>', effectiveFieldId),
   );
+  const provincialPosts = posts.length;
+  const postedScope = posts[0]?.payload?.regulatory_scope ?? null;
+  const normalEffectiveDateEnabled = effectiveFrom.disabled === false;
+  const normalSaveEnabled = saveButton.disabled === false;
+
+  state.minimum_effective_from = null;
+  await settings.loadPayrollJurisdiction();
+  const terminalStatus = status.textContent;
+  const terminalEffectiveDateDisabled = effectiveFrom.disabled === true;
+  const terminalSaveDisabled = saveButton.disabled === true;
+  await settings.savePayrollJurisdiction();
 
   console.log(JSON.stringify({
     minimum,
@@ -73,11 +86,18 @@ vm.runInContext(`${source}\nthis.SettingsPage = SettingsPage;`, context);
     federal_status: federalStatus,
     missing_scope_posts: missingScopePosts,
     missing_scope_status: missingScopeStatus,
-    provincial_posts: posts.length,
-    posted_scope: posts[0]?.payload?.regulatory_scope ?? null,
+    provincial_posts: provincialPosts,
+    posted_scope: postedScope,
     minimum_is_rendered_as_min_and_value:
       effectiveInput.includes('min="${escapeHtml(jurisdiction.minimum_effective_from ||') &&
       effectiveInput.includes('value="${escapeHtml(jurisdiction.minimum_effective_from ||'),
+    normal_effective_date_enabled: normalEffectiveDateEnabled,
+    normal_save_enabled: normalSaveEnabled,
+    terminal_effective_date_disabled: terminalEffectiveDateDisabled,
+    terminal_save_disabled: terminalSaveDisabled,
+    terminal_posts: posts.length,
+    terminal_status: status.textContent || terminalStatus,
+    markup_has_schedule_button: source.includes('id="payroll-jurisdiction-save"'),
     markup_has_required_scope: /id="payroll-jurisdiction-scope"[^>]*required/.test(markup),
     markup_names_federal_unsupported: /Federal payroll is not supported/.test(markup),
   }));

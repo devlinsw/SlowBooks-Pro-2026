@@ -149,11 +149,6 @@ def add_company_payroll_jurisdiction(
         raise PayrollJurisdictionError(
             "effective_from must be 2026-01-01 or later."
         )
-    if effective_from == date.max:
-        raise PayrollJurisdictionError(
-            "effective_from must allow a later calendar date."
-        )
-
     history = _ordered_history(db, lock=True)
     _validate_history(history)
     today = date.today()

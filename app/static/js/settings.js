@@ -3,6 +3,8 @@
  * condensed everything into a single page because nobody needs 12 tabs
  * for company name and tax rate.
  */
+const PAYROLL_JURISDICTION_NO_LATER_DATE =
+    'No later effective date is available; payroll jurisdiction changes cannot be scheduled.';
 const SettingsPage = {
     // The settings this page saves, the logo and the backups are the
     // administrator's: the server refuses them to every other role. A
@@ -95,11 +97,27 @@ const SettingsPage = {
             const state = await API.get('/settings/payroll-jurisdiction');
             target.innerHTML = SettingsPage._payrollJurisdictionMarkup(state);
             const effectiveFrom = document.getElementById('payroll-jurisdiction-effective-from');
-            if (effectiveFrom && state.minimum_effective_from) {
-                effectiveFrom.min = state.minimum_effective_from;
-                if (!effectiveFrom.value || effectiveFrom.value < state.minimum_effective_from) {
-                    effectiveFrom.value = state.minimum_effective_from;
+            const saveButton = document.getElementById('payroll-jurisdiction-save');
+            const status = document.getElementById('payroll-jurisdiction-save-status');
+            const noLaterDate = state.minimum_effective_from === null;
+            const minimumDate = state.minimum_effective_from || '';
+            if (effectiveFrom) {
+                effectiveFrom.disabled = noLaterDate;
+                effectiveFrom.min = minimumDate;
+                if (
+                    minimumDate &&
+                    (!effectiveFrom.value || effectiveFrom.value < minimumDate)
+                ) {
+                    effectiveFrom.value = minimumDate;
                 }
+            }
+            if (saveButton) saveButton.disabled = noLaterDate;
+            if (status && noLaterDate) {
+                status.textContent = PAYROLL_JURISDICTION_NO_LATER_DATE;
+            } else if (
+                status && status.textContent === PAYROLL_JURISDICTION_NO_LATER_DATE
+            ) {
+                status.textContent = '';
             }
         } catch (e) { /* a pre-upgrade server leaves the section's first read */ }
     },
@@ -110,6 +128,10 @@ const SettingsPage = {
         const scopeInput = document.getElementById('payroll-jurisdiction-scope');
         const status = document.getElementById('payroll-jurisdiction-save-status');
         if (!provinceInput || !effectiveFromInput || !scopeInput || !status) return;
+        if (effectiveFromInput.disabled) {
+            status.textContent = PAYROLL_JURISDICTION_NO_LATER_DATE;
+            return;
+        }
         const province = provinceInput.value;
         const effectiveFrom = effectiveFromInput.value;
         const regulatoryScope = scopeInput.value;
@@ -693,11 +715,11 @@ const SettingsPage = {
                             ${['AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'ON', 'PE', 'SK'].map(code => `<option value="${code}">${code}</option>`).join('')}
                         </select></div>
                     <div class="form-group"><label for="payroll-jurisdiction-effective-from">Effective from</label>
-                        <input id="payroll-jurisdiction-effective-from" data-admin type="date" required min="${escapeHtml(jurisdiction.minimum_effective_from || '')}" value="${escapeHtml(jurisdiction.minimum_effective_from || '')}"></div>
+                        <input id="payroll-jurisdiction-effective-from" data-admin type="date" required min="${escapeHtml(jurisdiction.minimum_effective_from || '')}" value="${escapeHtml(jurisdiction.minimum_effective_from || '')}" ${jurisdiction.minimum_effective_from === null ? 'disabled' : ''}></div>
                 </div>
                 <div class="form-actions" style="align-items:center;">
-                    <button type="button" class="btn btn-primary" data-admin data-write onclick="SettingsPage.savePayrollJurisdiction()">Set / schedule province</button>
-                    <span id="payroll-jurisdiction-save-status" role="status" aria-live="polite"></span>
+                    <button type="button" class="btn btn-primary" id="payroll-jurisdiction-save" data-admin data-write ${jurisdiction.minimum_effective_from === null ? 'disabled' : ''} onclick="SettingsPage.savePayrollJurisdiction()">Set / schedule province</button>
+                    <span id="payroll-jurisdiction-save-status" role="status" aria-live="polite">${jurisdiction.minimum_effective_from === null ? PAYROLL_JURISDICTION_NO_LATER_DATE : ''}</span>
                 </div>
             </section>
                 <!-- Always in reach: the one Save for the settings above sat at

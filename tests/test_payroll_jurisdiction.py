@@ -233,16 +233,40 @@ def test_malformed_effective_dates_are_refused_without_changing_history(client):
     assert client.get("/api/settings/payroll-jurisdiction").json()["history"] == []
 
 
-def test_date_max_is_rejected_and_get_remains_available(client):
+def test_date_max_is_allowed_as_a_terminal_initial_jurisdiction(client):
     response = client.post(
         "/api/settings/payroll-jurisdiction",
         json=_payload("AB", date.max),
     )
 
-    assert response.status_code == 422, response.text
+    assert response.status_code == 201, response.text
     state = client.get("/api/settings/payroll-jurisdiction")
     assert state.status_code == 200, state.text
-    assert state.json()["history"] == []
+    assert state.json()["minimum_effective_from"] is None
+    assert state.json()["history"][0]["effective_from"] == date.max.isoformat()
+
+
+def test_terminal_effective_date_can_be_scheduled_after_date_max_minus_one(client):
+    penultimate_date = date.max - timedelta(days=1)
+    initial = client.post(
+        "/api/settings/payroll-jurisdiction",
+        json=_payload("AB", penultimate_date),
+    )
+    assert initial.status_code == 201, initial.text
+
+    terminal = client.post(
+        "/api/settings/payroll-jurisdiction",
+        json=_payload("ON", date.max),
+    )
+    assert terminal.status_code == 201, terminal.text
+
+    state = client.get("/api/settings/payroll-jurisdiction")
+    assert state.status_code == 200, state.text
+    assert state.json()["minimum_effective_from"] is None
+    assert [item["effective_from"] for item in state.json()["history"]] == [
+        penultimate_date.isoformat(),
+        date.max.isoformat(),
+    ]
 
 
 def test_settings_ui_exposes_provincial_jurisdiction_and_explains_federal_limit():
@@ -284,8 +308,15 @@ def test_settings_ui_uses_server_minimum_and_requires_supported_scope():
     assert state["provincial_posts"] == 1
     assert state["posted_scope"] == "provincially_regulated"
     assert state["minimum_is_rendered_as_min_and_value"] is True
+    assert state["normal_effective_date_enabled"] is True
+    assert state["normal_save_enabled"] is True
+    assert state["terminal_effective_date_disabled"] is True
+    assert state["terminal_save_disabled"] is True
+    assert state["terminal_posts"] == 1
+    assert "No later effective date is available" in state["terminal_status"]
     assert state["markup_has_required_scope"] is True
     assert state["markup_names_federal_unsupported"] is True
+    assert state["markup_has_schedule_button"] is True
 
 
 def test_locked_file_backed_sqlite_returns_retryable_conflict_not_500(client, tmp_path):

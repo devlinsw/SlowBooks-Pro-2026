@@ -57,13 +57,18 @@ def _state(db: Session, as_of: date):
         None,
     )
     today = date.today()
-    minimum_effective_from = (
-        today
-        if not history
-        else max(
-            today + timedelta(days=1), history[-1].effective_from + timedelta(days=1)
+    if not history:
+        minimum_effective_from = today
+    else:
+        latest_effective_from = history[-1].effective_from
+        next_date = (
+            latest_effective_from + timedelta(days=1)
+            if latest_effective_from < date.max
+            else None
         )
-    )
+        minimum_effective_from = (
+            max(today + timedelta(days=1), next_date) if next_date else None
+        )
     return {
         "country_code": active.country_code if active else None,
         "province_code": active.province_code if active else None,
@@ -72,7 +77,9 @@ def _state(db: Session, as_of: date):
         if active and active.effective_to
         else None,
         "regulatory_scope": "provincially_regulated",
-        "minimum_effective_from": minimum_effective_from.isoformat(),
+        "minimum_effective_from": minimum_effective_from.isoformat()
+        if minimum_effective_from is not None
+        else None,
         "history": [_serialize(item) for item in history],
     }
 
