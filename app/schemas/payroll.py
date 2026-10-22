@@ -1,5 +1,5 @@
 from datetime import date
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel, model_validator
 from app.schemas.common import StrictModel
 
@@ -210,6 +210,7 @@ class PayRunResponse(BaseModel):
     period_start: date
     period_end: date
     pay_date: date
+    jurisdiction_snapshot: Optional[dict[str, Any]] = None
     status: str
     run_type: str = "regular"
     total_gross: float = 0

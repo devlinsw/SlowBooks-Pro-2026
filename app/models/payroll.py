@@ -8,6 +8,7 @@ import enum
 import hashlib
 
 from sqlalchemy import (
+    JSON,
     Column,
     Integer,
     String,
@@ -231,6 +232,9 @@ class PayRun(Base):
     period_start = Column(Date, nullable=False)
     period_end = Column(Date, nullable=False)
     pay_date = Column(Date, nullable=False)
+    # Copy of the company jurisdiction effective on pay_date. This is stored
+    # without a foreign key so later timeline edits cannot rewrite run history.
+    jurisdiction_snapshot = Column(JSON, nullable=True)
     status = Column(Enum(PayRunStatus), default=PayRunStatus.DRAFT)
     run_type = Column(Enum(PayRunType), default=PayRunType.REGULAR)
 
