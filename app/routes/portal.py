@@ -207,10 +207,10 @@ def _record_portal_access(
 ) -> None:
     """Insert one portal_accesses row.
 
-    Ordinary portal handlers commit the audit row immediately. A W-4 save
-    defers it into the locked profile transaction; failures there must
-    propagate so an audit error cannot roll back the jurisdiction lock and then
-    let the profile save continue unprotected.
+    Ordinary portal handlers and W-4 saves commit the audit row immediately.
+    W-4 saves then reacquire the shared jurisdiction lock for the final check
+    and profile write, so a later Canadian guard rejection cannot erase the
+    successful authentication audit or token-use update.
     """
     try:
         db.add(
@@ -517,7 +517,7 @@ def portal_profile_save(
     db: Session = Depends(get_db),
 ):
     _lock_us_employee_profile(db)
-    emp = _employee_from_cookie(request, db, commit=False)
+    emp = _employee_from_cookie(request, db)
     _guard_us_employee_profile(db)
     _save_profile(
         emp,
@@ -808,7 +808,7 @@ def portal_claim_profile_save(
     db: Session = Depends(get_db),
 ):
     _lock_us_employee_profile(db)
-    emp = _employee_from_token(request, token, db, commit=False)
+    emp = _employee_from_token(request, token, db)
     _guard_us_employee_profile(db)
     _save_profile(
         emp,

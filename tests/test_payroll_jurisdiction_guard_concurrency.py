@@ -355,7 +355,11 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
             )
             assert results["guarded"].status_code == 422, results["guarded"].text
             assert "jurisdiction" in commit_order
-            assert "guarded" not in commit_order
+            if kind in {"portal-cookie", "portal-token"}:
+                assert "guarded" in commit_order
+                assert commit_order.index("jurisdiction") < commit_order.index("guarded")
+            else:
+                assert "guarded" not in commit_order
 
         with SessionFactory() as verify:
             configured = verify.query(PayrollJurisdiction).one()
@@ -370,8 +374,17 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
                     assert stored.pay_rate == 25
                     assert stored.state is None
                     if kind in {"portal-cookie", "portal-token"}:
-                        assert stored.portal_token_last_used is None
-                        assert verify.query(PortalAccess).count() == 0
+                        assert stored.portal_token_last_used is not None
+                        assert verify.query(PortalAccess).count() == 1
+                        access = verify.query(PortalAccess).filter_by(
+                            employee_id=employee_id, success=True
+                        ).one()
+                        expected_path = (
+                            "/portal/profile"
+                            if kind == "portal-cookie"
+                            else "/portal/REDACTED/profile"
+                        )
+                        assert access.path == expected_path
                 elif kind == "pay-run":
                     assert verify.query(PayRun).count() == 0
                     assert verify.query(PayStub).count() == 0
