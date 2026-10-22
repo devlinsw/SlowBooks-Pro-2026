@@ -11,7 +11,8 @@ exists.
 | File | Status |
 |---|---|
 | [accountant-sharing.md](accountant-sharing.md) | DESIGN — two candidate architectures, neither chosen (2026-08-13) |
-| [canada.md](canada.md) | PARKED — scoped, sized, deliberately not started (2026-09-03) |
+| [canada.md](canada.md) | PARKED — other Canada topics; payroll scope superseded (2026-09-03) |
+| [canadian-payroll.md](canadian-payroll.md) | OWNER-APPROVED SCOPE — implementation in progress; not release-ready (2026-10-22) |
 
 A parked design is not a backlog item. If one of these gets built it will be
 because someone asked for it, not because it was written down.
