@@ -320,6 +320,85 @@ def test_locked_file_backed_sqlite_returns_retryable_conflict_not_500(client, tm
     assert "database is busy" in response.json()["detail"].lower()
 
 
+def test_post_commit_lock_does_not_break_jurisdiction_response_serialization(
+    client, tmp_path
+):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import Session as OrmSession, sessionmaker
+
+    from app.database import get_db
+    from app.main import app
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+
+    engine = create_engine(
+        f"sqlite:///{(tmp_path / 'post-commit-lock-jurisdiction.db').as_posix()}",
+        connect_args={"timeout": 0},
+    )
+    PayrollJurisdiction.__table__.create(engine)
+
+    class JurisdictionSession(OrmSession):
+        pass
+
+    Session = sessionmaker(
+        bind=engine,
+        class_=JurisdictionSession,
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=True,
+    )
+    lock = engine.connect()
+    lock_acquired = []
+
+    def file_backed_db():
+        session = Session()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    def lock_database_after_commit(session):
+        if session.get_bind() is engine:
+            lock.exec_driver_sql("BEGIN EXCLUSIVE")
+            lock_acquired.append(True)
+
+    event.listen(JurisdictionSession, "after_commit", lock_database_after_commit)
+    app.dependency_overrides[get_db] = file_backed_db
+    request_client = TestClient(app, raise_server_exceptions=False)
+    request_client.cookies.update(client.cookies)
+    today = date.today()
+    try:
+        response = request_client.post(
+            "/api/settings/payroll-jurisdiction",
+            json=_payload("AB", today),
+        )
+    finally:
+        lock.rollback()
+        lock.close()
+        event.remove(
+            JurisdictionSession, "after_commit", lock_database_after_commit
+        )
+        request_client.close()
+
+    assert lock_acquired == [True]
+    assert response.status_code == 201, response.text
+    assert response.json() == {
+        "country_code": "CA",
+        "province_code": "AB",
+        "regulatory_scope": "provincially_regulated",
+        "effective_from": today.isoformat(),
+        "effective_to": None,
+    }
+    with Session() as persisted_session:
+        persisted = persisted_session.query(PayrollJurisdiction).one()
+        assert persisted.country_code == "CA"
+        assert persisted.province_code == "AB"
+        assert persisted.regulatory_scope == "provincially_regulated"
+        assert persisted.effective_from == today
+        assert persisted.effective_to is None
+    engine.dispose()
+
+
 def test_unrelated_sqlite_operational_error_is_not_converted_to_lock_conflict(
     client, tmp_path
 ):

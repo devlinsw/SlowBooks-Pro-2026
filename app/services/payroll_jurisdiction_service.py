@@ -89,6 +89,17 @@ def list_company_payroll_jurisdictions(db):
     return history
 
 
+def serialize_company_payroll_jurisdiction(record):
+    """Snapshot a jurisdiction's API values while its ORM state is loaded."""
+    return {
+        "country_code": record.country_code,
+        "province_code": record.province_code,
+        "regulatory_scope": record.regulatory_scope,
+        "effective_from": record.effective_from.isoformat(),
+        "effective_to": record.effective_to.isoformat() if record.effective_to else None,
+    }
+
+
 def add_company_payroll_jurisdiction(
     db,
     *,
@@ -145,6 +156,7 @@ def add_company_payroll_jurisdiction(
         effective_to=None,
     )
     db.add(record)
+    response = serialize_company_payroll_jurisdiction(record)
     try:
         db.commit()
     except IntegrityError as exc:
@@ -152,4 +164,4 @@ def add_company_payroll_jurisdiction(
         raise PayrollJurisdictionConflict(
             "A payroll jurisdiction range already exists for that effective date."
         ) from exc
-    return record
+    return response

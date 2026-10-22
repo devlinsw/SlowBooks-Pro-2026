@@ -10,7 +10,6 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.payroll_jurisdiction import PayrollJurisdiction
 from app.services.payroll_jurisdiction_service import (
     PayrollJurisdictionAmbiguous,
     PayrollJurisdictionConflict,
@@ -18,6 +17,7 @@ from app.services.payroll_jurisdiction_service import (
     add_company_payroll_jurisdiction,
     list_company_payroll_jurisdictions,
     resolve_company_payroll_jurisdiction,
+    serialize_company_payroll_jurisdiction as _serialize,
 )
 
 router = APIRouter(
@@ -41,16 +41,6 @@ class PayrollJurisdictionCreate(BaseModel):
                 "Only provincially regulated workplaces are supported; federal payroll is not supported."
             )
         return value
-
-
-def _serialize(record: PayrollJurisdiction):
-    return {
-        "country_code": record.country_code,
-        "province_code": record.province_code,
-        "regulatory_scope": record.regulatory_scope,
-        "effective_from": record.effective_from.isoformat(),
-        "effective_to": record.effective_to.isoformat() if record.effective_to else None,
-    }
 
 
 def _state(db: Session, as_of: date):
@@ -123,7 +113,7 @@ def create_payroll_jurisdiction(
 ):
     """Set an initial jurisdiction or schedule a prospective province change."""
     try:
-        record = add_company_payroll_jurisdiction(
+        response = add_company_payroll_jurisdiction(
             db,
             country_code=data.country_code,
             province_code=data.province_code,
@@ -138,4 +128,4 @@ def create_payroll_jurisdiction(
         if isinstance(exc, PayrollJurisdictionConflict):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return _serialize(record)
+    return response
