@@ -71,8 +71,78 @@ const SettingsPage = {
         return text ? `<div id="company-logo-note" style="font-size:10px; color:var(--text-muted); margin-bottom:6px;">${escapeHtml(text)}</div>` : '';
     },
 
+    _payrollJurisdictionMarkup(state) {
+        const current = state.province_code
+            ? `${escapeHtml(state.country_code)}-${escapeHtml(state.province_code)} effective ${escapeHtml(state.effective_from)}`
+            : 'Not configured for today';
+        const rows = (state.history || []).map(item => `<tr>
+            <td>${escapeHtml(item.country_code)}-${escapeHtml(item.province_code)}</td>
+            <td>${escapeHtml(item.effective_from)}</td>
+            <td>${escapeHtml(item.effective_to || 'No end date')}</td>
+        </tr>`).join('');
+        const markup = `<div id="payroll-jurisdiction-current" role="status">Current jurisdiction: ${current}</div>
+            <div class="table-container" style="margin-top:8px;">
+                <table><thead><tr><th scope="col">Province</th><th scope="col">Effective from</th><th scope="col">Effective through</th></tr></thead>
+                <tbody>${rows || '<tr><td colspan="3">No jurisdiction history yet.</td></tr>'}</tbody></table>
+            </div>`;
+        return markup;
+    },
+
+    async loadPayrollJurisdiction() {
+        const target = document.getElementById('payroll-jurisdiction-history');
+        if (!target) return;
+        try {
+            const state = await API.get('/settings/payroll-jurisdiction');
+            target.innerHTML = SettingsPage._payrollJurisdictionMarkup(state);
+            const effectiveFrom = document.getElementById('payroll-jurisdiction-effective-from');
+            if (effectiveFrom) {
+                const latest = (state.history || []).slice(-1)[0];
+                let minimum = new Date();
+                if (latest) minimum = new Date(`${latest.effective_from}T00:00:00Z`);
+                minimum.setUTCDate(minimum.getUTCDate() + (latest ? 1 : 0));
+                const minDate = minimum.toISOString().slice(0, 10);
+                effectiveFrom.min = minDate;
+                if (!effectiveFrom.value || effectiveFrom.value < minDate) {
+                    effectiveFrom.value = minDate;
+                }
+            }
+        } catch (e) { /* a pre-upgrade server leaves the section's first read */ }
+    },
+
+    async savePayrollJurisdiction() {
+        const provinceInput = document.getElementById('payroll-jurisdiction-province');
+        const effectiveFromInput = document.getElementById('payroll-jurisdiction-effective-from');
+        const status = document.getElementById('payroll-jurisdiction-save-status');
+        if (!provinceInput || !effectiveFromInput || !status) return;
+        const province = provinceInput.value;
+        const effectiveFrom = effectiveFromInput.value;
+        if (!province || !effectiveFrom) {
+            status.textContent = 'Choose a province and effective date.';
+            return;
+        }
+        status.textContent = 'Saving…';
+        try {
+            const result = await API.post('/settings/payroll-jurisdiction', {
+                country_code: 'CA',
+                province_code: province,
+                effective_from: effectiveFrom,
+                regulatory_scope: 'provincially_regulated',
+            });
+            status.textContent = `${result.province_code} saved effective ${result.effective_from}.`;
+            await SettingsPage.loadPayrollJurisdiction();
+        } catch (e) {
+            status.textContent = e.message || 'Could not save the payroll jurisdiction.';
+        }
+    },
+
     async render() {
-        const s = await API.get('/settings');
+        const [s, jurisdiction] = await Promise.all([
+            API.get('/settings'),
+            API.get('/settings/payroll-jurisdiction').catch(() => ({
+                country_code: null, province_code: null, effective_from: null,
+                effective_to: null, history: [],
+            })),
+        ]);
         const logo = s.company_logo_path ? await API.get('/uploads/logo').catch(() => null) : null;
         // what the books hold; the closing date's state line describes this
         SettingsPage._savedClosingDate = s.closing_date || '';
@@ -91,6 +161,7 @@ const SettingsPage = {
             SettingsPage.loadOcrStatus();
             SettingsPage.loadOcrEnginePref();
             SettingsPage.loadUnreadableSecrets();
+            SettingsPage.loadPayrollJurisdiction();
             SettingsPage.scrollToFocus();
             SettingsPage._installLeaveGuard();
             SettingsPage._markClean();
@@ -585,6 +656,30 @@ const SettingsPage = {
                     <button type="button" class="btn btn-primary" onclick="SettingsPage.createApiToken()">Create Token</button>
                 </div>
 
+            <section class="settings-section" role="group" aria-labelledby="settings-h-payroll-jurisdiction">
+                <h3 id="settings-h-payroll-jurisdiction">Payroll Jurisdiction</h3>
+                <p style="font-size:11px; color:var(--text-muted);">
+                    One Canadian payroll province applies to this entire company and all employees.
+                    Only provincially regulated workplaces are supported. Federal payroll is not supported.
+                    Québec and the territories are not available.
+                </p>
+                <div id="payroll-jurisdiction-history">${SettingsPage._payrollJurisdictionMarkup(jurisdiction)}</div>
+                <div class="form-grid" style="align-items:end;">
+                    <div class="form-group"><label for="payroll-jurisdiction-country">Country</label>
+                        <select id="payroll-jurisdiction-country" data-admin disabled><option value="CA" selected>Canada (CA)</option></select></div>
+                    <div class="form-group"><label for="payroll-jurisdiction-province">Payroll province</label>
+                        <select id="payroll-jurisdiction-province" data-admin>
+                            <option value="">Choose province</option>
+                            ${['AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'ON', 'PE', 'SK'].map(code => `<option value="${code}">${code}</option>`).join('')}
+                        </select></div>
+                    <div class="form-group"><label for="payroll-jurisdiction-effective-from">Effective from</label>
+                        <input id="payroll-jurisdiction-effective-from" data-admin type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
+                </div>
+                <div class="form-actions" style="align-items:center;">
+                    <button type="button" class="btn btn-primary" data-admin data-write onclick="SettingsPage.savePayrollJurisdiction()">Set / schedule province</button>
+                    <span id="payroll-jurisdiction-save-status" role="status" aria-live="polite"></span>
+                </div>
+            </section>
                 <!-- Always in reach: the one Save for the settings above sat at
                      the very bottom, after 25 other buttons, and the first
                      "Save" on the page was AI Insights' (explore 2.17.3, L16). -->
