@@ -126,6 +126,7 @@ SETTINGS_KEPT = {
 # The page's own reads: what it shows loads for a bookkeeper
 SETTINGS_READS = [
     "/api/settings",
+    "/api/settings/payroll-jurisdiction",
     "/api/uploads/logo",
     "/api/backups",
     "/api/email-templates",
@@ -168,6 +169,16 @@ SETTINGS_KEPT_PARTS = {
 # is sent by Save Settings as well.
 SETTINGS_TAKEN = {
     "Save Settings": ("PUT", "/api/settings", {"company_name": "Harbor Light"}),
+    "Payroll Jurisdiction › Set / schedule province": (
+        "POST",
+        "/api/settings/payroll-jurisdiction",
+        {
+            "country_code": "CA",
+            "province_code": "AB",
+            "effective_from": date.today().isoformat(),
+            "regulatory_scope": "provincially_regulated",
+        },
+    ),
     "Company Information › company_type": (
         "PUT",
         "/api/settings",
@@ -222,6 +233,9 @@ SETTINGS_TAKEN_FROM_A_SIGN_IN = {
     ),
 }
 SETTINGS_TAKEN_PARTS = {
+    "Payroll Jurisdiction › #payroll-jurisdiction-scope": "Payroll Jurisdiction › Set / schedule province",
+    "Payroll Jurisdiction › #payroll-jurisdiction-province": "Payroll Jurisdiction › Set / schedule province",
+    "Payroll Jurisdiction › #payroll-jurisdiction-effective-from": "Payroll Jurisdiction › Set / schedule province",
     "AI Insights › #ai-settings-provider": "AI Insights › Save AI settings",
     "AI Insights › #ai-settings-model-select": "AI Insights › Save AI settings",
     "AI Insights › #ai-settings-key": "AI Insights › Save AI settings",
