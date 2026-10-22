@@ -570,3 +570,139 @@ def test_unrelated_check_constraint_integrity_error_is_not_mislabeled(
             regulatory_scope="provincially_regulated",
         )
     assert db_session.query(PayrollJurisdiction).count() == 0
+
+
+def test_simultaneous_initial_posts_preserve_one_consistent_timeline(
+    client, monkeypatch, tmp_path
+):
+    from threading import Barrier, Lock, Thread
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database import get_db
+    from app.main import app
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+    from app.services import payroll_jurisdiction_service
+
+    engine = create_engine(
+        f"sqlite:///{(tmp_path / 'concurrent-jurisdiction.db').as_posix()}",
+        connect_args={"check_same_thread": False, "timeout": 2},
+    )
+    PayrollJurisdiction.__table__.create(engine)
+    Session = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+    def file_backed_db():
+        session = Session()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    previous_override = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = file_backed_db
+    initial_reads = Barrier(2)
+    result_lock = Lock()
+    responses = []
+    worker_errors = []
+    initial_history_reads = 0
+    original_ordered_history = payroll_jurisdiction_service._ordered_history
+
+    def ordered_history_after_both_initial_reads(db, *, lock=False):
+        nonlocal initial_history_reads
+        history = original_ordered_history(db, lock=lock)
+        if lock:
+            with result_lock:
+                initial_history_reads += 1
+            initial_reads.wait(timeout=10)
+        return history
+
+    monkeypatch.setattr(
+        payroll_jurisdiction_service,
+        "_ordered_history",
+        ordered_history_after_both_initial_reads,
+    )
+
+    def post_initial_jurisdiction(province):
+        request_client = None
+        try:
+            request_client = TestClient(app, raise_server_exceptions=False)
+            request_client.cookies.update(client.cookies)
+            response = request_client.post(
+                "/api/settings/payroll-jurisdiction",
+                json=_payload(province, date.today()),
+            )
+            with result_lock:
+                responses.append(response)
+        except BaseException as exc:
+            with result_lock:
+                worker_errors.append(exc)
+        finally:
+            if request_client is not None:
+                request_client.close()
+
+    threads = [
+        Thread(target=post_initial_jurisdiction, args=(province,), daemon=True)
+        for province in ("AB", "ON")
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+        assert all(not thread.is_alive() for thread in threads), "POST worker timed out"
+        assert initial_history_reads == 2
+        assert worker_errors == []
+        assert len(responses) == 2
+        assert sorted(response.status_code for response in responses) == [201, 409]
+
+        created = next(
+            response for response in responses if response.status_code == 201
+        )
+        conflict = next(
+            response for response in responses if response.status_code == 409
+        )
+        assert conflict.json()["detail"] in {
+            "A payroll jurisdiction range already exists for that effective date.",
+            "Payroll jurisdiction database is busy; retry the request.",
+        }
+
+        with Session() as persisted_session:
+            records = persisted_session.query(PayrollJurisdiction).all()
+            assert len(records) == 1
+            stored = records[0]
+            stored_snapshot = {
+                "country_code": stored.country_code,
+                "province_code": stored.province_code,
+                "regulatory_scope": stored.regulatory_scope,
+                "effective_from": stored.effective_from.isoformat(),
+                "effective_to": stored.effective_to.isoformat()
+                if stored.effective_to
+                else None,
+            }
+            assert stored_snapshot == created.json()
+            assert stored.effective_to is None
+
+        history_client = TestClient(app, raise_server_exceptions=False)
+        history_client.cookies.update(client.cookies)
+        try:
+            history_response = history_client.get("/api/settings/payroll-jurisdiction")
+        finally:
+            history_client.close()
+        assert history_response.status_code == 200, history_response.text
+        history = history_response.json()
+        assert history["history"] == [stored_snapshot]
+        assert history["province_code"] == stored_snapshot["province_code"]
+        assert history["effective_from"] == stored_snapshot["effective_from"]
+        assert history["effective_to"] is None
+    finally:
+        initial_reads.abort()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(timeout=15)
+        if previous_override is None:
+            app.dependency_overrides.pop(get_db, None)
+        else:
+            app.dependency_overrides[get_db] = previous_override
+        engine.dispose()
