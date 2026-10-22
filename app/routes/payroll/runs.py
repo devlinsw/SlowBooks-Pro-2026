@@ -1,6 +1,7 @@
 import json
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 from fastapi import Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
@@ -17,6 +18,7 @@ from app.models.payroll import (
     Employee,
     periods_per_year,
 )
+from app.models.payroll_jurisdiction import PayrollJurisdiction
 from app.models.time_entries import TimeEntry, TimeEntryStatus
 from app.models.deductions import GarnishmentOrder
 from app.models.accounts import Account
@@ -32,6 +34,10 @@ from app.services.garnishment import (
 )
 from app.services.gross_up import gross_up
 from app.services.state_tax.reciprocity import withholding_state
+from app.services.payroll_jurisdiction_service import (
+    PayrollJurisdictionAmbiguous,
+    resolve_company_payroll_jurisdiction,
+)
 from app.services import benefits_engine
 
 
@@ -41,6 +47,23 @@ def _with_employee_names(run: PayRun) -> PayRunResponse:
         if stub.employee:
             stub_resp.employee_name = stub.employee.full_name
     return resp
+
+
+def _payroll_jurisdiction_snapshot(
+    record: PayrollJurisdiction | None, pay_date: date
+) -> dict[str, Any] | None:
+    """Copy jurisdiction source values onto the pay run, never by reference."""
+    if record is None:
+        return None
+    return {
+        "jurisdiction_id": record.id,
+        "country_code": record.country_code,
+        "province_code": record.province_code,
+        "regulatory_scope": record.regulatory_scope,
+        "effective_from": record.effective_from.isoformat(),
+        "effective_to": record.effective_to.isoformat() if record.effective_to else None,
+        "pay_date": pay_date.isoformat(),
+    }
 
 
 @router.get("", response_model=list[PayRunResponse])
@@ -150,6 +173,23 @@ def create_pay_run(data: PayRunCreate, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=400, detail=f"Invalid run_type: {data.run_type}"
         )
+    try:
+        jurisdiction = resolve_company_payroll_jurisdiction(db, data.pay_date)
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if jurisdiction is None and db.query(PayrollJurisdiction.id).first() is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="No configured payroll jurisdiction applies on the pay date.",
+        )
+    jurisdiction_snapshot = _payroll_jurisdiction_snapshot(
+        jurisdiction, data.pay_date
+    )
+    if jurisdiction is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="Canadian payroll calculation support is not enabled yet.",
+        )
     if not data.stubs:
         # A run with nobody on it used to be a 201 that paid no one. An
         # agent told to "run payroll for every period" posted 26 of them
@@ -178,6 +218,7 @@ def create_pay_run(data: PayRunCreate, db: Session = Depends(get_db)):
         period_start=data.period_start,
         period_end=data.period_end,
         pay_date=data.pay_date,
+        jurisdiction_snapshot=jurisdiction_snapshot,
         run_type=run_type,
     )
     db.add(run)
