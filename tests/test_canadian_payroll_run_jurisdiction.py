@@ -112,7 +112,7 @@ def test_active_canadian_jurisdiction_is_blocked_before_run_stub_or_time_mutatio
     assert persisted_entry.hours_regular == 8
 
 
-def test_configured_history_without_pay_date_match_fails_closed_without_a_run(
+def test_future_only_jurisdiction_keeps_pre_start_us_pay_run_legacy_behavior(
     client, db_session
 ):
     from app.models.payroll import PayRun, PayStub
@@ -124,13 +124,13 @@ def test_configured_history_without_pay_date_match_fails_closed_without_a_run(
 
     response = _run(client, employee["id"], today)
 
-    assert response.status_code == 422, response.text
-    assert (
-        "No configured payroll jurisdiction applies on the pay date"
-        in response.json()["detail"]
-    )
-    assert db_session.query(PayRun).count() == 0
-    assert db_session.query(PayStub).count() == 0
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["jurisdiction_snapshot"] is None
+    assert payload["stubs"][0]["gross_pay"] == 1000
+    assert db_session.query(PayRun).count() == 1
+    assert db_session.query(PayRun).one().jurisdiction_snapshot is None
+    assert db_session.query(PayStub).count() == 1
 
 
 def test_ambiguous_jurisdiction_history_fails_closed_without_a_run(
