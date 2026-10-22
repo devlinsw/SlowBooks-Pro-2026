@@ -5,6 +5,7 @@ its pay date, then snapshot the returned country/province on the run. This
 service never edits payroll runs or employee work-state fields.
 """
 
+import sqlite3
 from datetime import date, timedelta
 
 from sqlalchemy.exc import IntegrityError
@@ -100,6 +101,24 @@ def serialize_company_payroll_jurisdiction(record):
     }
 
 
+def _is_expected_timeline_unique_conflict(exc):
+    """Identify only the uniqueness constraints that protect the timeline."""
+    expected_constraints = {
+        "uq_company_payroll_jurisdiction_effective_from",
+        "uq_company_payroll_jurisdiction_open_range",
+    }
+    original = exc.orig
+    constraint_name = getattr(getattr(original, "diag", None), "constraint_name", None)
+    if constraint_name in expected_constraints:
+        return True
+    if isinstance(original, sqlite3.IntegrityError):
+        return str(original) in {
+            "UNIQUE constraint failed: company_payroll_jurisdictions.effective_from",
+            "UNIQUE constraint failed: index 'uq_company_payroll_jurisdiction_open_range'",
+        }
+    return False
+
+
 def add_company_payroll_jurisdiction(
     db,
     *,
@@ -161,7 +180,9 @@ def add_company_payroll_jurisdiction(
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise PayrollJurisdictionConflict(
-            "A payroll jurisdiction range already exists for that effective date."
-        ) from exc
+        if _is_expected_timeline_unique_conflict(exc):
+            raise PayrollJurisdictionConflict(
+                "A payroll jurisdiction range already exists for that effective date."
+            ) from exc
+        raise
     return response

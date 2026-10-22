@@ -435,3 +435,138 @@ def test_unrelated_sqlite_operational_error_is_not_converted_to_lock_conflict(
         engine.dispose()
 
     assert response.status_code == 500, response.text
+
+
+def test_get_derives_active_jurisdiction_from_its_history_snapshot(monkeypatch):
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+    from app.routes.payroll_jurisdiction import _state
+    from app.services import payroll_jurisdiction_service
+
+    today = date.today()
+    as_of = today + timedelta(days=35)
+    change_date = today + timedelta(days=30)
+    before_change = [
+        PayrollJurisdiction(
+            country_code="CA",
+            province_code="AB",
+            regulatory_scope="provincially_regulated",
+            effective_from=today,
+            effective_to=None,
+        )
+    ]
+    after_change = [
+        PayrollJurisdiction(
+            country_code="CA",
+            province_code="AB",
+            regulatory_scope="provincially_regulated",
+            effective_from=today,
+            effective_to=change_date - timedelta(days=1),
+        ),
+        PayrollJurisdiction(
+            country_code="CA",
+            province_code="ON",
+            regulatory_scope="provincially_regulated",
+            effective_from=change_date,
+            effective_to=None,
+        ),
+    ]
+    query_count = 0
+
+    def load_history(_db, *, lock=False):
+        nonlocal query_count
+        query_count += 1
+        return before_change if query_count == 1 else after_change
+
+    monkeypatch.setattr(
+        payroll_jurisdiction_service, "_ordered_history", load_history
+    )
+
+    state = _state(object(), as_of)
+
+    active_from_history = [
+        item
+        for item in state["history"]
+        if item["effective_from"] <= as_of.isoformat()
+        and (item["effective_to"] is None or as_of.isoformat() <= item["effective_to"])
+    ]
+    assert len(active_from_history) == 1
+    assert state["province_code"] == active_from_history[0]["province_code"]
+    assert state["effective_from"] == active_from_history[0]["effective_from"]
+    assert state["effective_to"] == active_from_history[0]["effective_to"]
+    assert query_count == 1
+
+
+@pytest.mark.parametrize(
+    "violation",
+    ["effective_from", "open_range"],
+)
+def test_expected_timeline_uniqueness_violations_map_to_conflict(
+    db_session, monkeypatch, violation
+):
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+    from app.services.payroll_jurisdiction_service import (
+        PayrollJurisdictionConflict,
+        add_company_payroll_jurisdiction,
+    )
+
+    today = date.today()
+    existing = PayrollJurisdiction(
+        country_code="CA",
+        province_code="AB",
+        regulatory_scope="provincially_regulated",
+        effective_from=today,
+        effective_to=None,
+    )
+    db_session.add(existing)
+    db_session.commit()
+
+    commit = db_session.commit
+
+    def commit_with_timeline_conflict():
+        pending = next(item for item in db_session.new if isinstance(item, PayrollJurisdiction))
+        if violation == "effective_from":
+            pending.effective_from = today
+        else:
+            existing.effective_to = None
+        commit()
+
+    monkeypatch.setattr(db_session, "commit", commit_with_timeline_conflict)
+
+    with pytest.raises(PayrollJurisdictionConflict, match="effective date"):
+        add_company_payroll_jurisdiction(
+            db_session,
+            country_code="CA",
+            province_code="ON",
+            effective_from=today + timedelta(days=30),
+            regulatory_scope="provincially_regulated",
+        )
+
+
+def test_unrelated_check_constraint_integrity_error_is_not_mislabeled(
+    db_session, monkeypatch
+):
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+    from app.services.payroll_jurisdiction_service import (
+        add_company_payroll_jurisdiction,
+    )
+
+    commit = db_session.commit
+
+    def commit_with_invalid_scope():
+        pending = next(item for item in db_session.new if isinstance(item, PayrollJurisdiction))
+        pending.regulatory_scope = "federally_regulated"
+        commit()
+
+    monkeypatch.setattr(db_session, "commit", commit_with_invalid_scope)
+
+    with pytest.raises(IntegrityError, match="ck_company_payroll_jurisdiction_scope"):
+        add_company_payroll_jurisdiction(
+            db_session,
+            country_code="CA",
+            province_code="ON",
+            effective_from=date.today(),
+            regulatory_scope="provincially_regulated",
+        )
+    assert db_session.query(PayrollJurisdiction).count() == 0

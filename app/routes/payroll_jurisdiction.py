@@ -16,7 +16,6 @@ from app.services.payroll_jurisdiction_service import (
     PayrollJurisdictionError,
     add_company_payroll_jurisdiction,
     list_company_payroll_jurisdictions,
-    resolve_company_payroll_jurisdiction,
     serialize_company_payroll_jurisdiction as _serialize,
 )
 
@@ -45,10 +44,18 @@ class PayrollJurisdictionCreate(BaseModel):
 
 def _state(db: Session, as_of: date):
     try:
-        active = resolve_company_payroll_jurisdiction(db, as_of)
         history = list_company_payroll_jurisdictions(db)
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    active = next(
+        (
+            item
+            for item in history
+            if item.effective_from <= as_of
+            and (item.effective_to is None or as_of <= item.effective_to)
+        ),
+        None,
+    )
     today = date.today()
     minimum_effective_from = (
         today
