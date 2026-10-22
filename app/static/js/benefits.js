@@ -76,7 +76,7 @@ const BenefitsPage = {
             const jurisdiction = await API.get('/settings/payroll-jurisdiction');
             const requiredFields = [
                 'country_code', 'province_code', 'effective_from', 'effective_to',
-                'regulatory_scope', 'minimum_effective_from', 'history',
+                'regulatory_scope', 'server_today', 'minimum_effective_from', 'history',
             ];
             const supportedProvinces = new Set(['AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'ON', 'PE', 'SK']);
             const isIsoDate = value => {
@@ -109,6 +109,24 @@ const BenefitsPage = {
                             Date.parse(`${entry.effective_from}T00:00:00.000Z`);
                 });
             };
+            const nextIsoDate = value => {
+                const date = new Date(`${value}T00:00:00.000Z`);
+                date.setUTCDate(date.getUTCDate() + 1);
+                return date.getUTCFullYear() > 9999 ? null : date.toISOString().slice(0, 10);
+            };
+            const hasConsistentMinimumEffectiveFrom = () => {
+                if (jurisdiction.history.length === 0) {
+                    return jurisdiction.minimum_effective_from === jurisdiction.server_today;
+                }
+                const nextServerDate = nextIsoDate(jurisdiction.server_today);
+                const nextHistoryDate = nextIsoDate(
+                    jurisdiction.history[jurisdiction.history.length - 1].effective_from
+                );
+                const expectedMinimum = nextServerDate && nextHistoryDate
+                    ? (nextServerDate > nextHistoryDate ? nextServerDate : nextHistoryDate)
+                    : null;
+                return jurisdiction.minimum_effective_from === expectedMinimum;
+            };
             const isObjectResponse = Boolean(
                 jurisdiction && typeof jurisdiction === 'object' && !Array.isArray(jurisdiction)
             );
@@ -127,8 +145,10 @@ const BenefitsPage = {
                 hasValidRange(jurisdiction.effective_from, jurisdiction.effective_to);
             const hasValidResponse = hasRequiredFields &&
                 jurisdiction.regulatory_scope === 'provincially_regulated' &&
+                isIsoDate(jurisdiction.server_today) &&
                 (jurisdiction.minimum_effective_from === null || isIsoDate(jurisdiction.minimum_effective_from)) &&
                 isValidHistory(jurisdiction.history) &&
+                hasConsistentMinimumEffectiveFrom() &&
                 (noActiveJurisdiction || activeJurisdiction);
             const currentDate = new Date().toISOString().slice(0, 10);
             const activeRecordIsInHistory = hasValidResponse && jurisdiction.country_code === 'CA' &&

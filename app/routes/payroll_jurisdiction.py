@@ -79,6 +79,7 @@ def _state(db: Session, as_of: date):
         if active and active.effective_to
         else None,
         "regulatory_scope": "provincially_regulated",
+        "server_today": today.isoformat(),
         "minimum_effective_from": minimum_effective_from.isoformat()
         if minimum_effective_from is not None
         else None,

@@ -37,6 +37,7 @@ function noActiveJurisdiction(overrides = {}) {
         effective_from: null,
         effective_to: null,
         regulatory_scope: jurisdictionScope,
+        server_today: today(),
         minimum_effective_from: today(),
         history: [],
         ...overrides,
@@ -106,6 +107,16 @@ test('no active jurisdiction preserves the US seed action and existing code list
     assert.doesNotMatch(html, /Canadian-reviewed/);
 });
 
+test('no-history minimum is checked against server date, not browser date', async () => {
+    const serverToday = addDays(today(), -1);
+    const page = fixture(noActiveJurisdiction({
+        server_today: serverToday,
+        minimum_effective_from: serverToday,
+    }));
+
+    assert.equal(hasSeedButton(await page._codesTab()), true);
+});
+
 test('future-only Canadian jurisdiction preserves the US seed action', async () => {
     const page = fixture(noActiveJurisdiction({
         minimum_effective_from: '2999-01-02',
@@ -113,6 +124,39 @@ test('future-only Canadian jurisdiction preserves the US seed action', async () 
     }));
 
     assert.equal(hasSeedButton(await page._codesTab()), true);
+});
+
+test('date-max history preserves null minimum and the US seed action', async () => {
+    const page = fixture(noActiveJurisdiction({
+        server_today: '9999-12-30',
+        minimum_effective_from: null,
+        history: [futureJurisdiction({ effective_from: '9999-12-31' })],
+    }));
+
+    assert.equal(hasSeedButton(await page._codesTab()), true);
+});
+
+test('inconsistent minimum date with empty history fails closed', async () => {
+    const html = await fixture(noActiveJurisdiction({
+        server_today: '2026-06-15',
+        minimum_effective_from: '1900-01-01',
+    }))._codesTab();
+
+    assert.equal(hasSeedButton(html), false);
+    assert.match(html, /role="alert"/);
+    assert.match(html, /payroll jurisdiction response is unsupported/);
+});
+
+test('inconsistent minimum date with future-only history fails closed', async () => {
+    const html = await fixture(noActiveJurisdiction({
+        server_today: '2026-06-15',
+        minimum_effective_from: '1900-01-01',
+        history: [futureJurisdiction()],
+    }))._codesTab();
+
+    assert.equal(hasSeedButton(html), false);
+    assert.match(html, /role="alert"/);
+    assert.match(html, /payroll jurisdiction response is unsupported/);
 });
 
 test('jurisdiction lookup failure hides seeding and explains the limitation', async () => {
@@ -168,6 +212,7 @@ test('missing required payroll-jurisdiction fields fail closed', async t => {
         'effective_from',
         'effective_to',
         'regulatory_scope',
+        'server_today',
         'minimum_effective_from',
         'history',
     ]) {
