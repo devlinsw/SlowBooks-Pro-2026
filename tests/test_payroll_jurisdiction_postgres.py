@@ -60,6 +60,16 @@ def test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypat
         PayrollJurisdiction.__table__.create(engine)
         Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=True)
 
+        @event.listens_for(engine, "before_cursor_execute")
+        def observe_second_writer_lock(
+            _connection, _cursor, statement, _parameters, _context, _many
+        ):
+            if (
+                current_thread().name == "schedule-B"
+                and "LOCK TABLE COMPANY_PAYROLL_JURISDICTIONS" in statement.upper()
+            ):
+                second_writer_entered_lock.set()
+
         today = date.today()
         first_change = today + timedelta(days=30)
         later_change = today + timedelta(days=60)
@@ -82,8 +92,6 @@ def test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypat
         errors = {}
 
         def ordered_history_with_barrier(session, *, lock=False):
-            if lock and current_thread().name == "schedule-B":
-                second_writer_entered_lock.set()
             history = original_ordered_history(session, lock=lock)
             if lock and current_thread().name == "schedule-A":
                 first_writer_locked.set()
@@ -124,9 +132,9 @@ def test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypat
         )
         try:
             writer_a.start()
-            assert first_writer_locked.wait(timeout=10), "schedule A did not acquire row lock"
+            assert first_writer_locked.wait(timeout=10), "schedule A did not acquire the transaction lock"
             writer_b.start()
-            assert second_writer_entered_lock.wait(timeout=10), "schedule B did not start lock query"
+            assert second_writer_entered_lock.wait(timeout=10), "schedule B did not attempt the table lock"
 
             with result_lock:
                 second_pid = backend_pids["B"]
@@ -146,7 +154,7 @@ def test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypat
                     time.sleep(0.025)
             assert lock_wait is not None, "schedule B backend disappeared while waiting"
             assert lock_wait["wait_event_type"] == "Lock", (
-                "schedule B was not blocked in PostgreSQL on schedule A's row lock: "
+                "schedule B was not blocked in PostgreSQL on schedule A's table lock: "
                 f"{dict(lock_wait)}"
             )
             assert "company_payroll_jurisdictions" in lock_wait["query"]

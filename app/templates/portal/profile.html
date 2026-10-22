@@ -9,6 +9,17 @@
 <div class="banner banner-success">Your changes have been saved.</div>
 {% endif %}
 
+{% if profile_jurisdiction == 'canada' %}
+<div class="banner banner-error" role="alert" aria-live="assertive">
+    Canadian employee setup is unavailable. Do not enter US W-4, state, or Social Security data.
+    Canadian tax setup is not provided here; contact your employer for guidance.
+</div>
+{% elif profile_jurisdiction != 'us' %}
+<div class="banner banner-error" role="alert" aria-live="assertive">
+    Payroll jurisdiction could not be confirmed. The US W-4 profile is unavailable.
+    Do not enter US W-4, state, or Social Security data; contact your employer.
+</div>
+{% else %}
 <p class="muted">Update your Form W-4 election and mailing address.</p>
 
 <form class="portal-form" method="post" action="/portal/profile">
@@ -85,4 +96,5 @@
 
     <button type="submit" class="btn">Save Changes</button>
 </form>
+{% endif %}
 {% endblock %}

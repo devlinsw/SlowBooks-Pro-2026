@@ -8,6 +8,7 @@ service never edits payroll runs or employee work-state fields.
 import sqlite3
 from datetime import date, timedelta
 
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.models.payroll_jurisdiction import PayrollJurisdiction
@@ -16,6 +17,50 @@ SUPPORTED_COUNTRY = "CA"
 SUPPORTED_PROVINCES = frozenset({"AB", "BC", "MB", "NB", "NL", "NS", "ON", "PE", "SK"})
 SUPPORTED_SCOPE = "provincially_regulated"
 MIN_EFFECTIVE_DATE = date(2026, 1, 1)
+
+
+_GUARD_TRANSACTION_INFO_KEY = "payroll_jurisdiction_guard_transaction"
+
+
+def lock_company_payroll_jurisdiction(db):
+    """Serialize jurisdiction activation with guarded legacy-US writes.
+
+    This must be the first database operation in a guarded mutation. SQLite has
+    no row locks, so a zero-row UPDATE takes its database writer lock even when
+    jurisdiction history is empty. PostgreSQL takes a transaction-scoped table
+    lock, which also protects the empty-history case. Both remain held until the
+    caller commits or rolls back. Unsupported dialects and lock failures fail
+    closed.
+    """
+    transaction = db.get_transaction()
+    if transaction is not None and db.info.get(_GUARD_TRANSACTION_INFO_KEY) is transaction:
+        return
+
+    try:
+        dialect = db.get_bind().dialect.name
+        if dialect == "sqlite":
+            db.execute(
+                text(
+                    "UPDATE company_payroll_jurisdictions "
+                    "SET effective_from = effective_from WHERE 1 = 0"
+                )
+            )
+        elif dialect == "postgresql":
+            db.execute(
+                text(
+                    "LOCK TABLE company_payroll_jurisdictions "
+                    "IN SHARE ROW EXCLUSIVE MODE"
+                )
+            )
+        else:
+            raise RuntimeError(
+                f"Payroll jurisdiction guard locking is unsupported for {dialect}."
+            )
+    except Exception:
+        db.rollback()
+        raise
+
+    db.info[_GUARD_TRANSACTION_INFO_KEY] = db.get_transaction()
 
 
 class PayrollJurisdictionError(ValueError):
@@ -149,6 +194,7 @@ def add_company_payroll_jurisdiction(
         raise PayrollJurisdictionError(
             "effective_from must be 2026-01-01 or later."
         )
+    lock_company_payroll_jurisdiction(db)
     history = _ordered_history(db, lock=True)
     _validate_history(history)
     today = date.today()
@@ -159,6 +205,10 @@ def add_company_payroll_jurisdiction(
             )
     else:
         latest = history[-1]
+        if effective_from == latest.effective_from:
+            raise PayrollJurisdictionConflict(
+                "A payroll jurisdiction range already exists for that effective date."
+            )
         if effective_from <= today:
             raise PayrollJurisdictionError(
                 "A payroll province change must be prospective (effective from a future date)."
