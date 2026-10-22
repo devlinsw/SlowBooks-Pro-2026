@@ -5,6 +5,7 @@
  */
 const PAYROLL_JURISDICTION_NO_LATER_DATE =
     'No later effective date is available; payroll jurisdiction changes cannot be scheduled.';
+const PAYROLL_JURISDICTION_MAX_DATE = '9999-12-31';
 const SettingsPage = {
     // The settings this page saves, the logo and the backups are the
     // administrator's: the server refuses them to every other role. A
@@ -104,6 +105,7 @@ const SettingsPage = {
             if (effectiveFrom) {
                 effectiveFrom.disabled = noLaterDate;
                 effectiveFrom.min = minimumDate;
+                effectiveFrom.max = PAYROLL_JURISDICTION_MAX_DATE;
                 if (
                     minimumDate &&
                     (!effectiveFrom.value || effectiveFrom.value < minimumDate)
@@ -149,6 +151,16 @@ const SettingsPage = {
         }
         if (!province || !effectiveFrom) {
             status.textContent = 'Choose a province and effective date.';
+            return;
+        }
+        const maximumYear = Number(PAYROLL_JURISDICTION_MAX_DATE.split('-')[0]);
+        const effectiveFromYear = Number(effectiveFrom.split('-')[0]);
+        if (
+            effectiveFromYear > maximumYear ||
+            effectiveFrom > PAYROLL_JURISDICTION_MAX_DATE ||
+            (effectiveFromInput.validity && effectiveFromInput.validity.rangeOverflow)
+        ) {
+            status.textContent = `Effective date must be on or before ${PAYROLL_JURISDICTION_MAX_DATE}.`;
             return;
         }
         if (effectiveFromInput.min && effectiveFrom < effectiveFromInput.min) {
@@ -715,7 +727,7 @@ const SettingsPage = {
                             ${['AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'ON', 'PE', 'SK'].map(code => `<option value="${code}">${code}</option>`).join('')}
                         </select></div>
                     <div class="form-group"><label for="payroll-jurisdiction-effective-from">Effective from</label>
-                        <input id="payroll-jurisdiction-effective-from" data-admin type="date" required min="${escapeHtml(jurisdiction.minimum_effective_from || '')}" value="${escapeHtml(jurisdiction.minimum_effective_from || '')}" ${jurisdiction.minimum_effective_from === null ? 'disabled' : ''}></div>
+                        <input id="payroll-jurisdiction-effective-from" data-admin type="date" required min="${escapeHtml(jurisdiction.minimum_effective_from || '')}" max="9999-12-31" value="${escapeHtml(jurisdiction.minimum_effective_from || '')}" ${jurisdiction.minimum_effective_from === null ? 'disabled' : ''}></div>
                 </div>
                 <div class="form-actions" style="align-items:center;">
                     <button type="button" class="btn btn-primary" id="payroll-jurisdiction-save" data-admin data-write ${jurisdiction.minimum_effective_from === null ? 'disabled' : ''} onclick="SettingsPage.savePayrollJurisdiction()">Set / schedule province</button>

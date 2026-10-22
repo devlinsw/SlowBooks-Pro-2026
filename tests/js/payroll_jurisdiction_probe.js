@@ -4,7 +4,24 @@ const vm = require('vm');
 const source = fs.readFileSync('app/static/js/settings.js', 'utf8');
 const scope = { value: 'federally_regulated' };
 const province = { value: 'BC' };
-const effectiveFrom = { value: '2030-01-01', min: '' };
+const effectiveFrom = {
+  value: '2030-01-01',
+  min: '',
+  max: '',
+  disabled: false,
+  get validity() {
+    const [year, month, day] = this.value.split('-').map(Number);
+    const [maxYear, maxMonth, maxDay] = this.max.split('-').map(Number);
+    return {
+      rangeOverflow: Boolean(
+        this.max &&
+        (year > maxYear ||
+          (year === maxYear && month > maxMonth) ||
+          (year === maxYear && month === maxMonth && day > maxDay)),
+      ),
+    };
+  },
+};
 const saveButton = { disabled: false };
 const history = { innerHTML: '' };
 const status = { textContent: '' };
@@ -71,6 +88,11 @@ vm.runInContext(`${source}\nthis.SettingsPage = SettingsPage;`, context);
   const postedScope = posts[0]?.payload?.regulatory_scope ?? null;
   const normalEffectiveDateEnabled = effectiveFrom.disabled === false;
   const normalSaveEnabled = saveButton.disabled === false;
+  effectiveFrom.value = '10000-01-01';
+  const overMaximumBrowserValidity = effectiveFrom.validity.rangeOverflow;
+  await settings.savePayrollJurisdiction();
+  const overMaximumPosts = posts.length;
+  const overMaximumStatus = status.textContent;
 
   state.minimum_effective_from = null;
   await settings.loadPayrollJurisdiction();
@@ -81,6 +103,7 @@ vm.runInContext(`${source}\nthis.SettingsPage = SettingsPage;`, context);
 
   console.log(JSON.stringify({
     minimum,
+    maximum: effectiveFrom.max,
     value: safeDefault,
     federal_posts: federalPosts,
     federal_status: federalStatus,
@@ -91,6 +114,10 @@ vm.runInContext(`${source}\nthis.SettingsPage = SettingsPage;`, context);
     minimum_is_rendered_as_min_and_value:
       effectiveInput.includes('min="${escapeHtml(jurisdiction.minimum_effective_from ||') &&
       effectiveInput.includes('value="${escapeHtml(jurisdiction.minimum_effective_from ||'),
+    maximum_is_rendered: effectiveInput.includes('max="9999-12-31"'),
+    over_maximum_browser_validity: overMaximumBrowserValidity,
+    over_maximum_posts: overMaximumPosts,
+    over_maximum_status: overMaximumStatus,
     normal_effective_date_enabled: normalEffectiveDateEnabled,
     normal_save_enabled: normalSaveEnabled,
     terminal_effective_date_disabled: terminalEffectiveDateDisabled,

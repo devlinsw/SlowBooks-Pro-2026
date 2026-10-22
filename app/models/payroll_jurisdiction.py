@@ -50,9 +50,7 @@ class PayrollJurisdiction(Base):
     id = Column(Integer, primary_key=True)
     country_code = Column(String(2), nullable=False, server_default="CA")
     province_code = Column(String(2), nullable=False)
-    regulatory_scope = Column(
-        String(32), nullable=False, server_default="provincially_regulated"
-    )
+    regulatory_scope = Column(String(32), nullable=False)
     effective_from = Column(Date, nullable=False)
     effective_to = Column(Date, nullable=True)
     created_at = Column(

@@ -28,7 +28,6 @@ def upgrade() -> None:
         sa.Column(
             "regulatory_scope",
             sa.String(length=32),
-            server_default="provincially_regulated",
             nullable=False,
         ),
         sa.Column("effective_from", sa.Date(), nullable=False),

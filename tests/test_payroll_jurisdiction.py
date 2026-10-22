@@ -133,6 +133,79 @@ def test_database_rejects_two_open_jurisdiction_ranges(db_session):
     db_session.rollback()
 
 
+def test_orm_insert_requires_explicit_regulatory_scope(db_session):
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+
+    db_session.add(
+        PayrollJurisdiction(
+            country_code="CA",
+            province_code="AB",
+            effective_from=date.today(),
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_jurisdiction_migration_upgrade_downgrade_reupgrade_has_no_scope_default(
+    tmp_path,
+):
+    import importlib.util
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import create_engine, inspect
+
+    root = Path(__file__).resolve().parents[1]
+    migration_path = (
+        root
+        / "migrations"
+        / "versions"
+        / "f1b2c3d4e5f6_company_payroll_jurisdictions.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "company_payroll_jurisdictions_migration", migration_path
+    )
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    engine = create_engine(
+        f"sqlite:///{(tmp_path / 'jurisdiction-migration.db').as_posix()}"
+    )
+
+    with engine.begin() as connection:
+        operations = MigrationContext.configure(connection)
+        with Operations.context(operations):
+            migration.upgrade()
+        columns = inspect(connection).get_columns("company_payroll_jurisdictions")
+        scope = next(
+            column for column in columns if column["name"] == "regulatory_scope"
+        )
+        assert scope["nullable"] is False
+        assert scope["default"] is None
+
+        with Operations.context(operations):
+            migration.downgrade()
+        assert (
+            "company_payroll_jurisdictions" not in inspect(connection).get_table_names()
+        )
+
+        with Operations.context(operations):
+            migration.upgrade()
+        columns = inspect(connection).get_columns("company_payroll_jurisdictions")
+        scope = next(
+            column for column in columns if column["name"] == "regulatory_scope"
+        )
+        assert scope["nullable"] is False
+        assert scope["default"] is None
+
+    engine.dispose()
+
+
 def test_schedule_cannot_backdate_or_overlap_an_already_scheduled_change(client):
     today = date.today()
     scheduled = today + timedelta(days=30)
@@ -308,6 +381,14 @@ def test_settings_ui_uses_server_minimum_and_requires_supported_scope():
     assert state["provincial_posts"] == 1
     assert state["posted_scope"] == "provincially_regulated"
     assert state["minimum_is_rendered_as_min_and_value"] is True
+    assert state["maximum"] == "9999-12-31"
+    assert state["maximum_is_rendered"] is True
+    assert state["over_maximum_browser_validity"] is True
+    assert state["over_maximum_posts"] == 1
+    assert (
+        state["over_maximum_status"]
+        == "Effective date must be on or before 9999-12-31."
+    )
     assert state["normal_effective_date_enabled"] is True
     assert state["normal_save_enabled"] is True
     assert state["terminal_effective_date_disabled"] is True
