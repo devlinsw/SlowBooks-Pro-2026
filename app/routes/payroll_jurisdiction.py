@@ -67,7 +67,9 @@ def _state(db: Session, as_of: date):
             else None
         )
         minimum_effective_from = (
-            max(today + timedelta(days=1), next_date) if next_date else None
+            max(today + timedelta(days=1), next_date)
+            if next_date and today < date.max
+            else None
         )
     return {
         "country_code": active.country_code if active else None,

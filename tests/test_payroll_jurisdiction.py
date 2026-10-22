@@ -342,6 +342,104 @@ def test_terminal_effective_date_can_be_scheduled_after_date_max_minus_one(clien
     ]
 
 
+def _freeze_jurisdiction_today(monkeypatch, current_date):
+    from app.routes import payroll_jurisdiction as route
+    from app.services import payroll_jurisdiction_service
+
+    class FrozenDate(date):
+        @classmethod
+        def today(cls):
+            return current_date
+
+    monkeypatch.setattr(route, "date", FrozenDate)
+    monkeypatch.setattr(payroll_jurisdiction_service, "date", FrozenDate)
+
+
+def test_get_with_history_on_date_max_returns_no_minimum_effective_date(
+    client, db_session, monkeypatch
+):
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+
+    effective_from = date.max - timedelta(days=1)
+    db_session.add(
+        PayrollJurisdiction(
+            country_code="CA",
+            province_code="AB",
+            regulatory_scope="provincially_regulated",
+            effective_from=effective_from,
+            effective_to=None,
+        )
+    )
+    db_session.commit()
+    _freeze_jurisdiction_today(monkeypatch, date.max)
+
+    response = client.get("/api/settings/payroll-jurisdiction")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["minimum_effective_from"] is None
+    assert response.json()["history"] == [
+        {
+            "country_code": "CA",
+            "province_code": "AB",
+            "regulatory_scope": "provincially_regulated",
+            "effective_from": effective_from.isoformat(),
+            "effective_to": None,
+        }
+    ]
+
+
+def test_unconfigured_company_can_set_date_max_when_today_is_date_max(
+    client, monkeypatch
+):
+    _freeze_jurisdiction_today(monkeypatch, date.max)
+
+    unconfigured = client.get("/api/settings/payroll-jurisdiction")
+    initial = client.post(
+        "/api/settings/payroll-jurisdiction", json=_payload("AB", date.max)
+    )
+    configured = client.get("/api/settings/payroll-jurisdiction")
+
+    assert unconfigured.status_code == 200, unconfigured.text
+    assert unconfigured.json()["minimum_effective_from"] == date.max.isoformat()
+    assert initial.status_code == 201, initial.text
+    assert configured.status_code == 200, configured.text
+    assert configured.json()["minimum_effective_from"] is None
+    assert configured.json()["history"][0]["effective_from"] == date.max.isoformat()
+
+
+def test_date_max_can_be_scheduled_when_today_is_date_max_minus_one(
+    client, db_session, monkeypatch
+):
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+
+    today = date.max - timedelta(days=1)
+    earlier = date.max - timedelta(days=2)
+    db_session.add(
+        PayrollJurisdiction(
+            country_code="CA",
+            province_code="AB",
+            regulatory_scope="provincially_regulated",
+            effective_from=earlier,
+            effective_to=None,
+        )
+    )
+    db_session.commit()
+    _freeze_jurisdiction_today(monkeypatch, today)
+
+    terminal = client.post(
+        "/api/settings/payroll-jurisdiction", json=_payload("ON", date.max)
+    )
+    state = client.get("/api/settings/payroll-jurisdiction")
+
+    assert terminal.status_code == 201, terminal.text
+    assert state.status_code == 200, state.text
+    assert state.json()["minimum_effective_from"] is None
+    assert [item["effective_from"] for item in state.json()["history"]] == [
+        earlier.isoformat(),
+        date.max.isoformat(),
+    ]
+
+
 def test_settings_ui_exposes_provincial_jurisdiction_and_explains_federal_limit():
     from pathlib import Path
 
