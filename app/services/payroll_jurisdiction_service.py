@@ -36,7 +36,14 @@ def _ordered_history(db, *, lock=False):
     )
     if lock:
         query = query.with_for_update()
-    return query.all()
+    history = query.all()
+    if lock and history:
+        # At READ COMMITTED, a SELECT FOR UPDATE that waited on a row lock may
+        # return the updated row from its old statement snapshot without rows
+        # inserted by the transaction it waited for. A fresh statement both
+        # sees those rows and refreshes already-loaded ORM instances.
+        history = query.populate_existing().all()
+    return history
 
 
 def _validate_history(history):
@@ -141,6 +148,10 @@ def add_company_payroll_jurisdiction(
     if effective_from < MIN_EFFECTIVE_DATE:
         raise PayrollJurisdictionError(
             "effective_from must be 2026-01-01 or later."
+        )
+    if effective_from == date.max:
+        raise PayrollJurisdictionError(
+            "effective_from must allow a later calendar date."
         )
 
     history = _ordered_history(db, lock=True)

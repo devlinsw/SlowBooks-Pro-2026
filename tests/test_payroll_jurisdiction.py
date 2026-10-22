@@ -233,6 +233,18 @@ def test_malformed_effective_dates_are_refused_without_changing_history(client):
     assert client.get("/api/settings/payroll-jurisdiction").json()["history"] == []
 
 
+def test_date_max_is_rejected_and_get_remains_available(client):
+    response = client.post(
+        "/api/settings/payroll-jurisdiction",
+        json=_payload("AB", date.max),
+    )
+
+    assert response.status_code == 422, response.text
+    state = client.get("/api/settings/payroll-jurisdiction")
+    assert state.status_code == 200, state.text
+    assert state.json()["history"] == []
+
+
 def test_settings_ui_exposes_provincial_jurisdiction_and_explains_federal_limit():
     from pathlib import Path
 
