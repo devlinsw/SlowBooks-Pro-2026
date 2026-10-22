@@ -150,18 +150,18 @@ const BenefitsPage = {
                 isValidHistory(jurisdiction.history) &&
                 hasConsistentMinimumEffectiveFrom() &&
                 (noActiveJurisdiction || activeJurisdiction);
-            const currentDate = new Date().toISOString().slice(0, 10);
+            const serverToday = jurisdiction.server_today;
             const activeRecordIsInHistory = hasValidResponse && jurisdiction.country_code === 'CA' &&
                 jurisdiction.history.some(entry =>
                     entry.country_code === jurisdiction.country_code &&
                     entry.province_code === jurisdiction.province_code &&
                     entry.effective_from === jurisdiction.effective_from &&
                     entry.effective_to === jurisdiction.effective_to &&
-                    entry.effective_from <= currentDate &&
-                    (entry.effective_to === null || currentDate <= entry.effective_to)
+                    entry.effective_from <= serverToday &&
+                    (entry.effective_to === null || serverToday <= entry.effective_to)
                 );
             const hasFutureOnlyHistory = hasValidResponse && noActiveJurisdiction && jurisdiction.history.every(
-                entry => entry.effective_from > currentDate
+                entry => entry.effective_from > serverToday
             );
             const hasSupportedJurisdiction = hasValidResponse &&
                 (jurisdiction.country_code === 'CA'

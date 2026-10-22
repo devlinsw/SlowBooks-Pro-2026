@@ -30,6 +30,19 @@ const addDays = (isoDate, days) => {
 };
 const jurisdictionScope = 'provincially_regulated';
 
+const browserDate = browserToday => {
+    const timestamp = Date.parse(`${browserToday}T00:00:00.000Z`);
+    return class extends Date {
+        constructor(...args) {
+            super(...(args.length ? args : [timestamp]));
+        }
+
+        static now() {
+            return timestamp;
+        }
+    };
+};
+
 function noActiveJurisdiction(overrides = {}) {
     return {
         country_code: null,
@@ -55,8 +68,9 @@ function futureJurisdiction(overrides = {}) {
     };
 }
 
-function fixture(jurisdiction, lookupError = null) {
+function fixture(jurisdiction, lookupError = null, browserToday = today()) {
     const context = {
+        Date: browserDate(browserToday),
         API: {
             get: async url => {
                 if (url.startsWith('/benefits/codes')) return [manualCode];
@@ -115,6 +129,38 @@ test('no-history minimum is checked against server date, not browser date', asyn
     }));
 
     assert.equal(hasSeedButton(await page._codesTab()), true);
+});
+
+test('future-only history starting on browser date preserves US seed action', async () => {
+    const serverToday = '2026-10-21';
+    const browserToday = '2026-10-22';
+    const page = fixture(noActiveJurisdiction({
+        server_today: serverToday,
+        minimum_effective_from: addDays(browserToday, 1),
+        history: [futureJurisdiction({ effective_from: browserToday })],
+    }), null, browserToday);
+
+    assert.equal(hasSeedButton(await page._codesTab()), true);
+});
+
+test('Canadian history active on server date shows the Canadian status notice', async () => {
+    const serverToday = '2026-10-21';
+    const browserToday = '2026-10-20';
+    const page = fixture(noActiveJurisdiction({
+        country_code: 'CA',
+        province_code: 'ON',
+        server_today: serverToday,
+        effective_from: serverToday,
+        minimum_effective_from: addDays(serverToday, 1),
+        history: [futureJurisdiction({ effective_from: serverToday })],
+    }), null, browserToday);
+    const html = await page._codesTab();
+
+    assert.equal(hasSeedButton(html), false);
+    assert.match(html, /role="status"/);
+    assert.match(html, /not Canadian-reviewed/);
+    assert.doesNotMatch(html, /role="alert"/);
+    assert.doesNotMatch(html, /unsupported payroll jurisdiction/);
 });
 
 test('future-only Canadian jurisdiction preserves the US seed action', async () => {
