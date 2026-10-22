@@ -88,6 +88,25 @@ test('jurisdiction lookup failure hides seeding and explains the limitation', as
     assert.match(html, /MANUAL/);
 });
 
+test('null country with a non-null province fails closed without hiding manual codes', async () => {
+    const page = fixture({ country_code: null, province_code: 'ON', history: [] });
+    const html = await page._codesTab();
+
+    assert.equal(hasSeedButton(html), false);
+    assert.match(html, /role="alert"/);
+    assert.match(html, /payroll jurisdiction response is unsupported/);
+    assert.match(html, /MANUAL/);
+});
+
+test('missing province in a null-country response fails closed', async () => {
+    const page = fixture({ country_code: null, history: [] });
+    const html = await page._codesTab();
+
+    assert.equal(hasSeedButton(html), false);
+    assert.match(html, /role="alert"/);
+    assert.match(html, /payroll jurisdiction response is unsupported/);
+});
+
 test('unknown jurisdiction response fails closed without hiding manual codes', async () => {
     const page = fixture({ country_code: 'ZZ', province_code: 'XX', history: [] });
     const html = await page._codesTab();

@@ -74,11 +74,22 @@ const BenefitsPage = {
         let seedNotice = '';
         try {
             const jurisdiction = await API.get('/settings/payroll-jurisdiction');
-            if (
-                !jurisdiction ||
-                typeof jurisdiction !== 'object' ||
-                !('country_code' in jurisdiction)
-            ) {
+            const hasJurisdictionCodes = Boolean(
+                jurisdiction &&
+                typeof jurisdiction === 'object' &&
+                !Array.isArray(jurisdiction) &&
+                'country_code' in jurisdiction &&
+                'province_code' in jurisdiction &&
+                (
+                    jurisdiction.country_code === null
+                        ? jurisdiction.province_code === null
+                        : typeof jurisdiction.country_code === 'string' &&
+                          jurisdiction.country_code.trim() !== '' &&
+                          (jurisdiction.country_code !== 'CA' ||
+                           (typeof jurisdiction.province_code === 'string' && jurisdiction.province_code.trim() !== ''))
+                )
+            );
+            if (!hasJurisdictionCodes) {
                 seedNotice = '<p role="alert" aria-live="assertive" style="margin:0 0 12px;">Standard benefit presets are unavailable because the payroll jurisdiction response is unsupported.</p>';
             } else if (jurisdiction.country_code === 'CA') {
                 seedNotice = '<p role="status" aria-live="polite" style="margin:0 0 12px;">Standard benefit presets are not Canadian-reviewed and are not available for Canadian companies.</p>';
