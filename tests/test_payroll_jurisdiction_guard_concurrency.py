@@ -319,7 +319,10 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
             assert profile_read.wait(timeout=10), "guarded route did not resolve real empty history"
             writer_thread.start()
             assert writer_service_started.wait(timeout=10), "jurisdiction writer did not enter service"
-            writer_lock_attempted.wait(timeout=2)
+            assert writer_lock_attempted.wait(timeout=2), (
+                "jurisdiction writer did not attempt the contended lock "
+                "before the guarded request was released"
+            )
             writer_finished_before_guard = writer_done.wait(timeout=0.5)
             release_profile.set()
         else:
