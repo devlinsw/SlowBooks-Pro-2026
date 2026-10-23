@@ -56,6 +56,49 @@ def _require_us_output_period(db: Session, run: PayRun) -> None:
         )
 
 
+def _paystub_ytd_contributors(db: Session, stub: PayStub, run: PayRun) -> list[PayStub]:
+    from app.routes.payroll.ytd import _ytd_stubs
+
+    try:
+        candidates = _ytd_stubs(db, stub.employee_id, run.pay_date.year)
+        contributors = []
+        contributor_runs = []
+        for candidate in candidates:
+            if candidate.id == stub.id:
+                continue
+            parent = candidate.pay_run
+            if parent is None:
+                raise PayrollJurisdictionAmbiguous(
+                    "A pay-stub YTD contributor has no parent pay run."
+                )
+            if parent.status != PayRunStatus.PROCESSED:
+                continue
+            if not isinstance(parent.pay_date, date):
+                raise PayrollJurisdictionAmbiguous(
+                    "A pay-stub YTD contributor has an invalid pay date."
+                )
+            if parent.pay_date <= run.pay_date:
+                contributors.append(candidate)
+                contributor_runs.append(parent)
+
+        contributors.append(stub)
+        contributor_runs.append(run)
+        for parent in contributor_runs:
+            _require_us_output_period(db, parent)
+        return contributors
+    except HTTPException:
+        raise
+    except PayrollJurisdictionPeriodBoundary as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Pay-stub YTD contributors are unavailable; payroll output is blocked.",
+        ) from exc
+
+
 @router.get("/{run_id}/paystub/{stub_id}")
 def download_paystub(run_id: int, stub_id: int, db: Session = Depends(get_db)):
     """Generate the PDF pay stub for one employee on a pay run."""
@@ -79,17 +122,10 @@ def download_paystub(run_id: int, stub_id: int, db: Session = Depends(get_db)):
     # Year to date means up to this pay date: the stubs of processed runs
     # this year dated on or before it, and this stub (a later run, or a
     # draft, is not part of what this stub reports).
-    from app.models.payroll import PayRunStatus
-    from app.routes.payroll.ytd import _ytd_stubs
-
-    ytd_stubs = [
-        s
-        for s in _ytd_stubs(db, stub.employee_id, run.pay_date.year)
-        if s.id != stub.id
-        and s.pay_run.pay_date <= run.pay_date
-        and s.pay_run.status == PayRunStatus.PROCESSED
-    ] + [stub]
-    ytd = employee_ytd(db, stub.employee_id, run.pay_date.year)
+    ytd_stubs = _paystub_ytd_contributors(db, stub, run)
+    ytd = employee_ytd(
+        db, stub.employee_id, run.pay_date.year, stubs=ytd_stubs
+    )
     for key, attr in (("gross", "gross_pay"), ("net", "net_pay")):
         ytd[key] = sum((getattr(s, attr) or 0 for s in ytd_stubs), Decimal("0"))
     pdf = generate_paystub_pdf(

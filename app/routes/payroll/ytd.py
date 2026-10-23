@@ -15,7 +15,9 @@ from app.models.payroll import (
 # Year-to-date helpers — fixes Bug 1 (YTD was never threaded into the calc, so
 # the Social Security wage-base cap could never fire).
 # ---------------------------------------------------------------------------
-def _ytd_stubs(db: Session, employee_id: int, year: int, before: date = None):
+def _ytd_stubs(
+    db: Session, employee_id: int, year: int, before: date | None = None
+):
     q = (
         db.query(PayStub)
         .join(PayRun, PayStub.pay_run_id == PayRun.id)
@@ -31,7 +33,13 @@ def _ytd_stubs(db: Session, employee_id: int, year: int, before: date = None):
     return q.all()
 
 
-def employee_ytd(db: Session, employee_id: int, year: int, before: date = None) -> dict:
+def employee_ytd(
+    db: Session,
+    employee_id: int,
+    year: int,
+    before: date | None = None,
+    stubs: list[PayStub] | None = None,
+) -> dict:
     """Aggregate an employee's pay-stub figures for a calendar year."""
     totals = {
         "gross": Decimal("0"),
@@ -43,7 +51,9 @@ def employee_ytd(db: Session, employee_id: int, year: int, before: date = None) 
         "pretax_deductions": Decimal("0"),
         "net": Decimal("0"),
     }
-    for s in _ytd_stubs(db, employee_id, year, before):
+    for s in (
+        _ytd_stubs(db, employee_id, year, before) if stubs is None else stubs
+    ):
         totals["gross"] += s.gross_pay or 0
         totals["federal"] += s.federal_tax or 0
         totals["state"] += s.state_tax or 0
