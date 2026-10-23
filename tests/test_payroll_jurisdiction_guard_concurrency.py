@@ -1,12 +1,13 @@
 """Real competing-transaction coverage for jurisdiction activation guards.
 
 These tests use an independent file-backed SQLite database and actual HTTP
-routes. The barriers hold one transaction after its real jurisdiction read,
-then start the competing write in the historical check/commit race window.
+routes. Barriers synchronize at real lock acquisitions and timeline reads, then
+exercise both transaction-winner orders.
 """
 
 from datetime import date
 from threading import Event, Thread
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -77,6 +78,11 @@ def _guarded_request(client, kind, employee_id, token):
                 ],
             },
         )
+    if kind == "gross-up":
+        return client.post(
+            "/api/payroll/gross-up",
+            json={"employee_id": employee_id, "target_net": 2000, "supplemental": True},
+        )
     raise AssertionError(kind)
 
 
@@ -88,6 +94,7 @@ def _guarded_request(client, kind, employee_id, token):
         "portal-cookie",
         "portal-token",
         "pay-run",
+        "gross-up",
         "benefit-seed",
     ],
 )
@@ -95,10 +102,11 @@ def _guarded_request(client, kind, employee_id, token):
 def test_guarded_write_and_initial_jurisdiction_activation_serialize(
     client, monkeypatch, tmp_path, kind, winner
 ):
-    """Each real guarded route must serialize against empty-history activation.
+    """Each guarded route serializes against initial jurisdiction activation.
 
-    If the guarded route wins, it commits before activation. If activation wins,
-    the route sees Canada and refuses before guarded writes.
+    Mutating routes commit before activation when they win. Read-only gross-up
+    holds its shared transaction lock until the response session closes. When
+    activation wins, a later request must resolve the committed Canadian range.
     """
     from app.database import Base, get_db, enable_sqlite_tuning
     from app.main import app
@@ -206,6 +214,8 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
     profile_first_sql_attempted = Event()
     profile_done = Event()
     writer_done = Event()
+    gross_up_transaction_released = Event()
+    activation_commits_after_gross_up_release = []
     results = {}
     thread_errors = {}
     commit_order = []
@@ -241,6 +251,19 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         if role in {"guarded", "jurisdiction"}:
             commit_order.append(role)
             commit_records.append((role, session.info.get("commit_stage")))
+        if kind == "gross-up" and role == "jurisdiction":
+            activation_commits_after_gross_up_release.append(
+                gross_up_transaction_released.is_set()
+            )
+
+    @event.listens_for(SessionClass, "after_transaction_end")
+    def _record_gross_up_transaction_end(session, transaction):
+        if (
+            kind == "gross-up"
+            and session.info.get("race_role") == "guarded"
+            and transaction.parent is None
+        ):
+            gross_up_transaction_released.set()
 
     original_history = payroll_jurisdiction_service._ordered_history
 
@@ -269,6 +292,7 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         "portal-cookie": portal_routes,
         "portal-token": portal_routes,
         "pay-run": run_routes,
+        "gross-up": run_routes,
         "benefit-seed": benefit_routes,
     }[kind]
     if kind in {"portal-cookie", "portal-token"}:
@@ -299,6 +323,21 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         return result
 
     monkeypatch.setattr(route_module, "resolve_company_payroll_jurisdiction", pause_after_real_resolution)
+
+    gross_up_spies: dict[str, Mock] = {}
+    if kind == "gross-up":
+        gross_up_spies = {
+            "ytd": Mock(wraps=run_routes.employee_ytd),
+            "supplemental_ytd": Mock(wraps=run_routes._ytd_supplemental),
+            "withholdings": Mock(wraps=run_routes.calculate_withholdings),
+        }
+        monkeypatch.setattr(run_routes, "employee_ytd", gross_up_spies["ytd"])
+        monkeypatch.setattr(
+            run_routes, "_ytd_supplemental", gross_up_spies["supplemental_ytd"]
+        )
+        monkeypatch.setattr(
+            run_routes, "calculate_withholdings", gross_up_spies["withholdings"]
+        )
 
     def send_guarded_request():
         try:
@@ -372,7 +411,7 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         assert thread_errors == {}, f"request threads failed: {thread_errors!r}"
         assert set(results) == {"guarded", "jurisdiction"}
         assert results["jurisdiction"].status_code == 201, results["jurisdiction"].text
-        if kind != "benefit-seed":
+        if kind not in {"benefit-seed", "gross-up"}:
             assert first_sql_by_role["guarded"].upper().startswith(
                 "UPDATE COMPANY_PAYROLL_JURISDICTIONS"
             ), first_sql_by_role
@@ -386,6 +425,17 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
                 "request still held the empty-history decision"
             )
             assert results["guarded"].status_code in {200, 201, 303}, results["guarded"].text
+            if kind == "gross-up":
+                assert results["guarded"].status_code == 200, results["guarded"].text
+                assert profile_lock_attempted.is_set(), "gross-up did not acquire the shared lock"
+                assert first_sql_by_role["guarded"].upper().startswith(
+                    "UPDATE COMPANY_PAYROLL_JURISDICTIONS"
+                ), first_sql_by_role
+                assert "guarded" not in commit_order, commit_order
+                assert gross_up_spies["ytd"].called
+                assert gross_up_spies["withholdings"].called
+                assert gross_up_transaction_released.is_set()
+                assert activation_commits_after_gross_up_release == [True]
             if kind in {"portal-cookie", "portal-token"}:
                 profile_commit_indexes = [
                     index
@@ -406,10 +456,11 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
                 ) >= 2, commit_records
                 jurisdiction_commit_index = commit_records.index(("jurisdiction", None))
                 assert profile_commit_index < jurisdiction_commit_index, commit_records
-            last_guarded_commit_index = max(
-                index for index, role in enumerate(commit_order) if role == "guarded"
-            )
-            assert last_guarded_commit_index < commit_order.index("jurisdiction"), commit_order
+            if kind != "gross-up":
+                last_guarded_commit_index = max(
+                    index for index, role in enumerate(commit_order) if role == "guarded"
+                )
+                assert last_guarded_commit_index < commit_order.index("jurisdiction"), commit_order
         else:
             assert not guarded_finished_before_activation, (
                 "guarded request completed after reading empty history while "
@@ -417,6 +468,11 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
             )
             assert results["guarded"].status_code == 422, results["guarded"].text
             assert "jurisdiction" in commit_order
+            if kind == "gross-up":
+                assert profile_lock_attempted.is_set(), "gross-up did not acquire the shared lock"
+                gross_up_spies["ytd"].assert_not_called()
+                gross_up_spies["supplemental_ytd"].assert_not_called()
+                gross_up_spies["withholdings"].assert_not_called()
             if kind in {"portal-cookie", "portal-token"}:
                 assert "guarded" in commit_order
                 assert commit_order.index("jurisdiction") < commit_order.index("guarded")
@@ -426,6 +482,9 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         with SessionFactory() as verify:
             configured = verify.query(PayrollJurisdiction).one()
             assert configured.country_code == "CA"
+            if kind == "gross-up":
+                assert verify.query(PayRun).count() == 0
+                assert verify.query(PayStub).count() == 0
             if winner == "jurisdiction":
                 if kind == "admin-create":
                     assert verify.query(Employee).count() == 1  # seeded row only
@@ -490,6 +549,7 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         event.remove(SessionClass, "after_begin", _tag_connection)
         event.remove(engine, "before_cursor_execute", _observe_lock_attempt)
         event.remove(SessionClass, "after_commit", _record_commit)
+        event.remove(SessionClass, "after_transaction_end", _record_gross_up_transaction_end)
         if previous_override is None:
             app.dependency_overrides.pop(get_db, None)
         else:
@@ -505,12 +565,13 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
         "portal-cookie",
         "portal-token",
         "pay-run",
+        "gross-up",
         "benefit-seed",
         "jurisdiction-writer",
     ],
 )
 def test_jurisdiction_lock_failure_fails_closed_before_mutation(
-    client, tmp_path, kind
+    client, tmp_path, kind, monkeypatch
 ):
     """A real DB lock-acquisition error must stop each protected route."""
     import sqlite3
@@ -529,6 +590,11 @@ def test_jurisdiction_lock_failure_fails_closed_before_mutation(
     from app.models.payroll import Employee, FilingStatus, PayRun, PayStub
     from app.models.payroll_jurisdiction import PayrollJurisdiction
     from app.models.portal_access import PortalAccess
+    from app.routes.payroll import runs as run_routes
+
+    gross_up_withholdings = Mock(wraps=run_routes.calculate_withholdings)
+    if kind == "gross-up":
+        monkeypatch.setattr(run_routes, "calculate_withholdings", gross_up_withholdings)
 
     engine = create_engine(
         f"sqlite:///{(tmp_path / f'lock-failure-{kind}.sqlite').as_posix()}",
@@ -585,6 +651,12 @@ def test_jurisdiction_lock_failure_fails_closed_before_mutation(
             else:
                 response = _guarded_request(request_client, kind, employee_id, token)
                 assert response.status_code == 503, response.text
+                if kind == "gross-up":
+                    assert response.json()["detail"] == (
+                        "Payroll jurisdiction status is unavailable; "
+                        "gross-up calculation is blocked."
+                    )
+                    gross_up_withholdings.assert_not_called()
 
         with SessionFactory() as verify:
             assert verify.query(PayrollJurisdiction).count() == 0

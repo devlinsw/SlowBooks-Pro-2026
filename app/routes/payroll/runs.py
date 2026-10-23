@@ -812,6 +812,14 @@ def process_pay_run(run_id: int, db: Session = Depends(get_db)):
 @router.post("/gross-up", response_model=GrossUpResponse)
 def gross_up_paycheck(data: GrossUpRequest, db: Session = Depends(get_db)):
     """Net-to-gross: reverse-solve the gross pay that yields a target take-home."""
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; gross-up calculation is blocked.",
+        ) from exc
+
     emp = db.query(Employee).filter(Employee.id == data.employee_id).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
