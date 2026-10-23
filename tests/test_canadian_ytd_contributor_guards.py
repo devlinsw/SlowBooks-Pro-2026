@@ -43,13 +43,14 @@ def _seed_run(
     gross=1000,
     federal=100,
     run_type=PayRunType.REGULAR,
+    status=PayRunStatus.PROCESSED,
     snapshot=None,
 ):
     run = PayRun(
         period_start=period_start,
         period_end=period_end,
         pay_date=pay_date,
-        status=PayRunStatus.PROCESSED,
+        status=status,
         run_type=run_type,
         jurisdiction_snapshot=snapshot,
         total_gross=gross,
@@ -500,3 +501,188 @@ def test_employee_ytd_fails_closed_on_contributor_lock_or_query_error(
 
     assert response.status_code == 503, response.text
     ytd_spy.assert_not_called()
+
+
+def test_employee_ytd_excludes_draft_runs_but_keeps_processed_stubs(client, db_session):
+    employee = _employee(client)
+    year = date.today().year
+    _processed_run, processed_stub = _seed_run(
+        db_session,
+        employee["id"],
+        period_start=date(year, 2, 1),
+        period_end=date(year, 2, 14),
+        pay_date=date(year, 2, 20),
+        gross=1000,
+        federal=100,
+    )
+    _draft_run, draft_stub = _seed_run(
+        db_session,
+        employee["id"],
+        period_start=date(year, 3, 1),
+        period_end=date(year, 3, 14),
+        pay_date=date(year, 3, 20),
+        gross=90000,
+        federal=30000,
+        status=PayRunStatus.DRAFT,
+    )
+
+    response = client.get(f"/api/employees/{employee['id']}/ytd?year={year}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["gross"] == 1000
+    assert response.json()["federal"] == 100
+
+
+def test_payroll_ytd_and_supplemental_inputs_share_only_processed_bonus_stubs(
+    client, db_session, monkeypatch
+):
+    from app.routes.payroll import runs as payroll_runs
+
+    employee = _employee(client)
+    year = date.today().year
+    _processed_run, processed_stub = _seed_run(
+        db_session,
+        employee["id"],
+        period_start=date(year, 2, 1),
+        period_end=date(year, 2, 14),
+        pay_date=date(year, 2, 20),
+        gross=1200,
+        federal=100,
+        run_type=PayRunType.BONUS,
+    )
+    _draft_run, draft_stub = _seed_run(
+        db_session,
+        employee["id"],
+        period_start=date(year, 3, 1),
+        period_end=date(year, 3, 14),
+        pay_date=date(year, 3, 20),
+        gross=80000,
+        federal=20000,
+        run_type=PayRunType.BONUS,
+        status=PayRunStatus.DRAFT,
+    )
+    processed_stub_id = processed_stub.id
+    draft_stub_id = draft_stub.id
+    observed_ytd_sets = []
+    observed_ytd_records = []
+    observed_supplemental_sets = []
+    observed_supplemental_records = []
+    original_employee_ytd = payroll_runs.employee_ytd
+    original_ytd_supplemental = payroll_runs._ytd_supplemental
+
+    def observe_ytd(*args, **kwargs):
+        stubs = kwargs["stubs"]
+        observed_ytd_sets.append(stubs)
+        observed_ytd_records.append([(stub.id, stub.pay_run.status) for stub in stubs])
+        return original_employee_ytd(*args, **kwargs)
+
+    def observe_supplemental(*args, **kwargs):
+        stubs = kwargs["stubs"]
+        observed_supplemental_sets.append(stubs)
+        observed_supplemental_records.append(
+            [(stub.id, stub.pay_run.status) for stub in stubs]
+        )
+        return original_ytd_supplemental(*args, **kwargs)
+
+    ytd_spy = Mock(side_effect=observe_ytd)
+    supplemental_spy = Mock(side_effect=observe_supplemental)
+    withholding_spy = Mock(wraps=payroll_runs.calculate_withholdings)
+    monkeypatch.setattr(payroll_runs, "employee_ytd", ytd_spy)
+    monkeypatch.setattr(payroll_runs, "_ytd_supplemental", supplemental_spy)
+    monkeypatch.setattr(payroll_runs, "calculate_withholdings", withholding_spy)
+
+    response = client.post(
+        "/api/payroll",
+        json={
+            "period_start": f"{year}-04-01",
+            "period_end": f"{year}-04-14",
+            "pay_date": f"{year}-04-20",
+            "run_type": "bonus",
+            "stubs": [
+                {
+                    "employee_id": employee["id"],
+                    "gross_override": 900,
+                    "supplemental": True,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert observed_ytd_sets[0] is observed_supplemental_sets[0]
+    assert observed_ytd_records == [[(processed_stub_id, PayRunStatus.PROCESSED)]]
+    assert observed_supplemental_records == [
+        [(processed_stub_id, PayRunStatus.PROCESSED)]
+    ]
+    assert draft_stub_id != processed_stub_id
+    assert withholding_spy.call_args.kwargs["ytd_gross"] == Decimal("1200")
+    assert withholding_spy.call_args.kwargs["ytd_supplemental"] == Decimal("1200")
+
+
+def test_aggregate_supplemental_uses_processed_regular_run_not_draft(
+    client, db_session, monkeypatch
+):
+    from app.routes.payroll import runs as payroll_runs
+
+    employee = _employee(client)
+    year = date.today().year
+    _processed_run, processed_stub = _seed_run(
+        db_session,
+        employee["id"],
+        period_start=date(year, 8, 1),
+        period_end=date(year, 8, 14),
+        pay_date=date(year, 8, 20),
+        gross=1500,
+        run_type=PayRunType.REGULAR,
+    )
+    _draft_run, draft_stub = _seed_run(
+        db_session,
+        employee["id"],
+        period_start=date(year, 9, 1),
+        period_end=date(year, 9, 14),
+        pay_date=date(year, 9, 20),
+        gross=95000,
+        run_type=PayRunType.REGULAR,
+        status=PayRunStatus.DRAFT,
+    )
+    withholding_spy = Mock(wraps=payroll_runs.calculate_withholdings)
+    monkeypatch.setattr(payroll_runs, "calculate_withholdings", withholding_spy)
+
+    response = client.post(
+        "/api/payroll",
+        json={
+            "period_start": f"{year}-10-01",
+            "period_end": f"{year}-10-14",
+            "pay_date": f"{year}-10-20",
+            "stubs": [
+                {
+                    "employee_id": employee["id"],
+                    "gross_override": 900,
+                    "supplemental": True,
+                    "supplemental_method": "aggregate",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert withholding_spy.call_args.kwargs["regular_wages"] == Decimal("1500")
+
+
+@pytest.mark.parametrize("year", [0, 10000])
+def test_employee_ytd_rejects_out_of_range_year_before_jurisdiction_reads(
+    client, monkeypatch, year
+):
+    from app.routes import employees
+
+    employee = _employee(client)
+    lock_spy = Mock(wraps=employees.lock_company_payroll_jurisdiction)
+    resolver_spy = Mock(wraps=employees.is_us_payroll_period)
+    monkeypatch.setattr(employees, "lock_company_payroll_jurisdiction", lock_spy)
+    monkeypatch.setattr(employees, "is_us_payroll_period", resolver_spy)
+
+    response = client.get(f"/api/employees/{employee['id']}/ytd?year={year}")
+
+    assert response.status_code == 422, response.text
+    lock_spy.assert_not_called()
+    resolver_spy.assert_not_called()

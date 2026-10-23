@@ -451,7 +451,9 @@ def regenerate_portal_token(
 # --- Year-to-date ----------------------------------------------------------
 @router.get("/{emp_id}/ytd", response_model=YTDResponse)
 def get_employee_ytd(
-    emp_id: int, year: int = Query(default=None), db: Session = Depends(get_db)
+    emp_id: int,
+    year: int | None = Query(default=None, ge=1, le=9999),
+    db: Session = Depends(get_db),
 ):
     """Year-to-date payroll totals for an employee (exposes the Bug 1 fix)."""
     try:

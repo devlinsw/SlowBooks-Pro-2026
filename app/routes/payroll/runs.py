@@ -196,7 +196,7 @@ def _last_regular_gross(db: Session, employee_id: int, before: date) -> Decimal:
             .filter(
                 PayStub.employee_id == employee_id,
                 PayRun.run_type == PayRunType.REGULAR,
-                PayRun.status != PayRunStatus.VOID,
+                PayRun.status == PayRunStatus.PROCESSED,
                 PayRun.pay_date < before,
             )
             .order_by(PayRun.pay_date.desc())

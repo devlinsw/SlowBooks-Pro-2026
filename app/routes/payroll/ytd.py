@@ -30,7 +30,7 @@ def _ytd_stubs(
         .join(PayRun, PayStub.pay_run_id == PayRun.id)
         .filter(
             PayStub.employee_id == employee_id,
-            PayRun.status != PayRunStatus.VOID,
+            PayRun.status == PayRunStatus.PROCESSED,
             PayRun.pay_date >= date(year, 1, 1),
             PayRun.pay_date <= date(year, 12, 31),
         )
