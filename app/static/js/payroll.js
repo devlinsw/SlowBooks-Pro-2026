@@ -180,6 +180,9 @@ const PayrollPage = {
         // to the first Stub PDF, with no name in sight (2.18.0 gate, macbase1
         // NEW-3).
         const who = (s) => s.employee_name || `Employee ${s.employee_id}`;
+        const stubCell = (s) => run.status === 'processed'
+            ? `<button class="btn btn-sm btn-secondary" aria-label="${escapeHtml(`Stub PDF — ${who(s)}`)}" title="Printable pay stub (PDF)" onclick="window.open('/api/payroll/${run.id}/paystub/${s.id}','_blank')">Stub PDF — ${escapeHtml(who(s))}</button>`
+            : '—';
         let rows = run.stubs.map(s => `
             <tr>
                 <td>${escapeHtml(who(s))}</td>
@@ -194,7 +197,7 @@ const PayrollPage = {
                 <td class="amount">${formatCurrency((s.pretax_deductions || 0) + (s.posttax_deductions || 0))}</td>
                 ${anyReimb ? `<td class="amount">${formatCurrency(s.reimbursements || 0)}</td>` : ''}
                 <td class="amount" style="font-weight:700;">${formatCurrency(s.net_pay)}</td>
-                <td class="actions"><button class="btn btn-sm btn-secondary" aria-label="${escapeHtml(`Stub PDF — ${who(s)}`)}" title="Printable pay stub (PDF)" onclick="window.open('/api/payroll/${run.id}/paystub/${s.id}','_blank')">Stub PDF — ${escapeHtml(who(s))}</button></td>
+                <td class="actions">${stubCell(s)}</td>
             </tr>`).join('');
 
         openModal(`Pay Run: ${run.period_start} to ${run.period_end}`, `

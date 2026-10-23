@@ -44,7 +44,10 @@ def run(client, seed_accounts):
         },
     )
     assert r.status_code == 201, r.text
-    return r.json()
+    run = r.json()
+    processed = client.post(f"/api/payroll/{run['id']}/process")
+    assert processed.status_code == 200, processed.text
+    return run
 
 
 def test_the_stub_names_the_company_in_settings(client, run, monkeypatch):
@@ -78,4 +81,6 @@ def test_each_employee_on_a_pay_run_has_a_stub_link():
     js = (JS / "payroll.js").read_text(encoding="utf-8")
     view = js[js.index("async view(id)") : js.index("async process(id)")]
     assert "window.open('/api/payroll/${run.id}/paystub/${s.id}','_blank')" in view
+    assert "const stubCell = (s) => run.status === 'processed'" in view
+    assert '<td class="actions">${stubCell(s)}</td>' in view
     assert '<th scope="col">Stub</th>' in view

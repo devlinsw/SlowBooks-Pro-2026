@@ -148,6 +148,35 @@ def test_paystub_blocks_before_ytd_or_pdf_for_overlapping_period(
     ytd_spy.assert_not_called()
 
 
+@pytest.mark.parametrize("status", [PayRunStatus.DRAFT, PayRunStatus.VOID])
+def test_paystub_rejects_nonprocessed_target_before_ytd_or_pdf(
+    client, db_session, monkeypatch, status
+):
+    from app.routes.payroll import exports
+    from app.services import paystub_pdf
+
+    employee = _employee(client)
+    today = date.today()
+    run = _create_draft(client, employee["id"], today, today, today)
+    stored_run = db_session.get(PayRun, run["id"])
+    stored_run.status = status
+    db_session.commit()
+    pdf_spy = Mock(return_value=b"unsafe PDF")
+    ytd_spy = Mock(wraps=exports.employee_ytd)
+    monkeypatch.setattr(paystub_pdf, "generate_paystub_pdf", pdf_spy)
+    monkeypatch.setattr(exports, "employee_ytd", ytd_spy)
+
+    response = client.get(
+        f"/api/payroll/{run['id']}/paystub/{run['stubs'][0]['id']}"
+    )
+
+    assert response.status_code == 400, response.text
+    assert "processed" in response.json()["detail"].lower()
+    pdf_spy.assert_not_called()
+    ytd_spy.assert_not_called()
+    assert db_session.get(PayRun, run["id"]).status is status
+
+
 def test_paystub_blocks_when_ytd_includes_legacy_canadian_run_before_ytd_or_pdf(
     client, db_session, monkeypatch
 ):
@@ -198,6 +227,15 @@ def test_paystub_ytd_excludes_later_canadian_period_and_keeps_safe_pdf(
 
     employee = _employee(client)
     effective_from = date.today() + timedelta(days=1)
+    _earlier_run, earlier_stub = _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=effective_from - timedelta(days=28),
+        period_end=effective_from - timedelta(days=22),
+        pay_date=effective_from - timedelta(days=21),
+        gross=500,
+        federal=50,
+    )
     safe_run, safe_stub = _seed_legacy_processed_run(
         db_session,
         employee["id"],
@@ -209,7 +247,7 @@ def test_paystub_ytd_excludes_later_canadian_period_and_keeps_safe_pdf(
     )
     configured = _jurisdiction(client, effective_from)
     assert configured.status_code == 201, configured.text
-    _seed_legacy_processed_run(
+    _future_run, future_stub = _seed_legacy_processed_run(
         db_session,
         employee["id"],
         period_start=effective_from,
@@ -232,8 +270,9 @@ def test_paystub_ytd_excludes_later_canadian_period_and_keeps_safe_pdf(
     ytd_spy.assert_called_once()
     rendered_ytd = pdf_spy.call_args.args[4]
     rendered_stubs = pdf_spy.call_args.kwargs["ytd_stubs"]
-    assert rendered_ytd["federal"] == "100.00"
-    assert [stub.id for stub in rendered_stubs] == [safe_stub.id]
+    assert rendered_ytd["federal"] == "150.00"
+    assert {stub.id for stub in rendered_stubs} == {earlier_stub.id, safe_stub.id}
+    assert future_stub.id not in {stub.id for stub in rendered_stubs}
 
 
 def test_nacha_blocks_legacy_processed_canadian_run_before_generation(

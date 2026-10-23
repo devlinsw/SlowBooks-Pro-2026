@@ -117,6 +117,11 @@ def download_paystub(run_id: int, stub_id: int, db: Session = Depends(get_db)):
     )
     if not stub:
         raise HTTPException(status_code=404, detail="Pay stub not found")
+    if run.status != PayRunStatus.PROCESSED:
+        raise HTTPException(
+            status_code=400,
+            detail="Pay run must be processed before pay-stub PDF download",
+        )
     emp = db.query(Employee).filter(Employee.id == stub.employee_id).first()
 
     # Year to date means up to this pay date: the stubs of processed runs
