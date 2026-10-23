@@ -24,8 +24,6 @@ def _jurisdiction(client, province, effective_from):
         "/api/settings/payroll-jurisdiction",
         json={
             "country_code": "CA",
-            "province_code": province,
-            "regulatory_scope": "provincially_regulated",
             "effective_from": effective_from.isoformat(),
         },
     )

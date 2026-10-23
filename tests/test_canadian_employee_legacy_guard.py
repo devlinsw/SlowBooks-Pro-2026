@@ -52,8 +52,6 @@ def _configure_canada(client, effective_from=None):
         "/api/settings/payroll-jurisdiction",
         json={
             "country_code": "CA",
-            "province_code": "ON",
-            "regulatory_scope": "provincially_regulated",
             "effective_from": (effective_from or date.today()).isoformat(),
         },
     )

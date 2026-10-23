@@ -296,6 +296,9 @@ class PayStub(Base):
     # Work-location state for this stub (multi-state employees) — drives SUTA
     # situs and state withholding independently of the employee's home state.
     work_state = Column(String(2), nullable=True)
+    # Employee-specific province snapshot; stored independently from the
+    # company country-mode snapshot and never re-resolved for historical stubs.
+    employee_jurisdiction_snapshot = Column(JSON, nullable=True)
 
     # Employer-side taxes (not withheld from the employee — company expense)
     employer_ss_tax = Column(Numeric(15, 2), default=0)

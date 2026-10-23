@@ -72,20 +72,19 @@ const SettingsPage = {
     },
 
     _payrollJurisdictionMarkup(state) {
-        const current = state.province_code
-            ? `${escapeHtml(state.country_code)}-${escapeHtml(state.province_code)} effective ${escapeHtml(state.effective_from)}`
-            : 'Not configured for today';
+        const current = state.country_code
+            ? `${escapeHtml(state.country_code)} payroll mode effective ${escapeHtml(state.effective_from)}`
+            : 'Canadian payroll mode not configured for today';
         const rows = (state.history || []).map(item => `<tr>
-            <td>${escapeHtml(item.country_code)}-${escapeHtml(item.province_code)}</td>
+            <td>${escapeHtml(item.country_code)}</td>
             <td>${escapeHtml(item.effective_from)}</td>
             <td>${escapeHtml(item.effective_to || 'No end date')}</td>
         </tr>`).join('');
-        const markup = `<div id="payroll-jurisdiction-current" role="status">Current jurisdiction: ${current}</div>
+        return `<div id="payroll-jurisdiction-current" role="status">Country mode: ${current}</div>
             <div class="table-container" style="margin-top:8px;">
-                <table><thead><tr><th scope="col">Province</th><th scope="col">Effective from</th><th scope="col">Effective through</th></tr></thead>
-                <tbody>${rows || '<tr><td colspan="3">No jurisdiction history yet.</td></tr>'}</tbody></table>
+                <table><thead><tr><th scope="col">Country</th><th scope="col">Effective from</th><th scope="col">Effective through</th></tr></thead>
+                <tbody>${rows || '<tr><td colspan="3">No country-mode history yet.</td></tr>'}</tbody></table>
             </div>`;
-        return markup;
     },
 
     async loadPayrollJurisdiction() {
@@ -122,32 +121,16 @@ const SettingsPage = {
     },
 
     async savePayrollJurisdiction() {
-        const provinceInput = document.getElementById('payroll-jurisdiction-province');
         const effectiveFromInput = document.getElementById('payroll-jurisdiction-effective-from');
-        const scopeInput = document.getElementById('payroll-jurisdiction-scope');
         const status = document.getElementById('payroll-jurisdiction-save-status');
-        if (!provinceInput || !effectiveFromInput || !scopeInput || !status) return;
+        if (!effectiveFromInput || !status) return;
         if (effectiveFromInput.disabled) {
             status.textContent = PAYROLL_JURISDICTION_NO_LATER_DATE;
             return;
         }
-        const province = provinceInput.value;
         const effectiveFrom = effectiveFromInput.value;
-        const regulatoryScope = scopeInput.value;
-        if (!regulatoryScope) {
-            status.textContent = 'Choose the workplace regulation classification.';
-            return;
-        }
-        if (regulatoryScope === 'federally_regulated') {
-            status.textContent = 'Federal payroll is not supported; only provincially regulated workplaces can be configured.';
-            return;
-        }
-        if (regulatoryScope !== 'provincially_regulated') {
-            status.textContent = 'Choose a supported workplace regulation classification.';
-            return;
-        }
-        if (!province || !effectiveFrom) {
-            status.textContent = 'Choose a province and effective date.';
+        if (!effectiveFrom) {
+            status.textContent = 'Choose an effective date.';
             return;
         }
         const maximumYear = Number(PAYROLL_JURISDICTION_MAX_DATE.split('-')[0]);
@@ -168,14 +151,12 @@ const SettingsPage = {
         try {
             const result = await API.post('/settings/payroll-jurisdiction', {
                 country_code: 'CA',
-                province_code: province,
                 effective_from: effectiveFrom,
-                regulatory_scope: regulatoryScope,
             });
-            status.textContent = `${result.province_code} saved effective ${result.effective_from}.`;
+            status.textContent = `Canadian payroll mode saved effective ${result.effective_from}.`;
             await SettingsPage.loadPayrollJurisdiction();
         } catch (e) {
-            status.textContent = e.message || 'Could not save the payroll jurisdiction.';
+            status.textContent = e.message || 'Could not save the payroll country mode.';
         }
     },
 
@@ -183,7 +164,7 @@ const SettingsPage = {
         const [s, jurisdiction] = await Promise.all([
             API.get('/settings'),
             API.get('/settings/payroll-jurisdiction').catch(() => ({
-                country_code: null, province_code: null, effective_from: null,
+                country_code: null, effective_from: null,
                 effective_to: null, history: [],
             })),
         ]);
@@ -695,33 +676,19 @@ const SettingsPage = {
                 </div>
 
             <section class="settings-section" role="group" aria-labelledby="settings-h-payroll-jurisdiction">
-                <h3 id="settings-h-payroll-jurisdiction">Payroll Jurisdiction</h3>
+                <h3 id="settings-h-payroll-jurisdiction">Payroll Country Mode</h3>
                 <p style="font-size:11px; color:var(--text-muted);">
-                    One Canadian payroll province applies to this entire company and all employees.
-                    Only provincially regulated workplaces are supported. Federal payroll is not supported.
-                    Québec and the territories are not available.
+                    This setting activates Canadian payroll mode for the company and prevents concurrent U.S. payroll.
+                    Province of employment must be configured per employee; that editor and Canadian payroll calculations
+                    are not implemented yet. Do not use this setting as evidence that Canadian payroll is ready.
                 </p>
                 <div id="payroll-jurisdiction-history">${SettingsPage._payrollJurisdictionMarkup(jurisdiction)}</div>
                 <div class="form-grid" style="align-items:end;">
-                    <div class="form-group"><label for="payroll-jurisdiction-country">Country</label>
-                        <select id="payroll-jurisdiction-country" data-admin disabled><option value="CA" selected>Canada (CA)</option></select></div>
-                    <div class="form-group"><label for="payroll-jurisdiction-scope">Workplace regulation</label>
-                        <select id="payroll-jurisdiction-scope" data-admin required>
-                            <option value="">Choose classification</option>
-                            <option value="provincially_regulated">Provincially regulated (supported)</option>
-                            <option value="federally_regulated">Federally regulated (not supported)</option>
-                        </select>
-                        <small style="color:var(--text-muted);">Federal payroll is not supported.</small></div>
-                    <div class="form-group"><label for="payroll-jurisdiction-province">Payroll province</label>
-                        <select id="payroll-jurisdiction-province" data-admin>
-                            <option value="">Choose province</option>
-                            ${['AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'ON', 'PE', 'SK'].map(code => `<option value="${code}">${code}</option>`).join('')}
-                        </select></div>
-                    <div class="form-group"><label for="payroll-jurisdiction-effective-from">Effective from</label>
+                    <div class="form-group"><label for="payroll-jurisdiction-effective-from">Canadian mode effective from</label>
                         <input id="payroll-jurisdiction-effective-from" data-admin type="date" required min="${escapeHtml(jurisdiction.minimum_effective_from || '')}" max="9999-12-31" value="${escapeHtml(jurisdiction.minimum_effective_from || '')}" ${jurisdiction.minimum_effective_from === null ? 'disabled' : ''}></div>
                 </div>
                 <div class="form-actions" style="align-items:center;">
-                    <button type="button" class="btn btn-primary" id="payroll-jurisdiction-save" data-admin data-write ${jurisdiction.minimum_effective_from === null ? 'disabled' : ''} onclick="SettingsPage.savePayrollJurisdiction()">Set / schedule province</button>
+                    <button type="button" class="btn btn-primary" id="payroll-jurisdiction-save" data-admin data-write ${jurisdiction.minimum_effective_from === null ? 'disabled' : ''} onclick="SettingsPage.savePayrollJurisdiction()">Enable Canadian mode</button>
                     <span id="payroll-jurisdiction-save-status" role="status" aria-live="polite">${jurisdiction.minimum_effective_from === null ? PAYROLL_JURISDICTION_NO_LATER_DATE : ''}</span>
                 </div>
             </section>

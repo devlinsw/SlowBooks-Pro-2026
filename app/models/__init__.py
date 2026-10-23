@@ -63,6 +63,7 @@ from app.models.portal_access import PortalAccess
 from app.models.reseller_permit import ResellerPermit
 from app.models.payroll import Employee, PayRun, PayStub
 from app.models.payroll_jurisdiction import PayrollJurisdiction
+from app.models.employee_payroll_jurisdiction import EmployeePayrollJurisdiction
 
 # Tier 1: Full payroll / HR system
 from app.models.time_entries import TimeEntry
@@ -144,6 +145,7 @@ __all__ = [
     "PayRun",
     "PayStub",
     "PayrollJurisdiction",
+    "EmployeePayrollJurisdiction",
     # Tier 1: Full payroll / HR
     "TimeEntry",
     "PTOPolicy",

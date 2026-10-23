@@ -1,4 +1,9 @@
-"""Company-wide payroll jurisdiction history (per company database)."""
+"""Company-level country mode history.
+
+The nullable province column is retained only so legacy values can remain in
+place for audit and rollback. New company records leave it NULL; employee
+province-of-employment belongs in EmployeePayrollJurisdiction.
+"""
 
 from sqlalchemy import (
     CheckConstraint,
@@ -22,7 +27,6 @@ class PayrollJurisdiction(Base):
         UniqueConstraint(
             "effective_from", name="uq_company_payroll_jurisdiction_effective_from"
         ),
-        # A partial unique constant index guarantees one open-ended range.
         Index(
             "uq_company_payroll_jurisdiction_open_range",
             text("(1)"),
@@ -33,6 +37,8 @@ class PayrollJurisdiction(Base):
         CheckConstraint(
             "country_code = 'CA'", name="ck_company_payroll_jurisdiction_country"
         ),
+        # Allows the original audited province values, but NULL is the only
+        # value used for new company-level country mode records.
         CheckConstraint(
             "province_code IN ('AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'ON', 'PE', 'SK')",
             name="ck_company_payroll_jurisdiction_province",
@@ -49,7 +55,7 @@ class PayrollJurisdiction(Base):
 
     id = Column(Integer, primary_key=True)
     country_code = Column(String(2), nullable=False, server_default="CA")
-    province_code = Column(String(2), nullable=False)
+    province_code = Column(String(2), nullable=True)
     regulatory_scope = Column(String(32), nullable=False)
     effective_from = Column(Date, nullable=False)
     effective_to = Column(Date, nullable=True)

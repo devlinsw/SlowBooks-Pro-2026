@@ -153,8 +153,6 @@ def test_us_pay_run_processing_and_canadian_activation_serialize(
                     "/api/settings/payroll-jurisdiction",
                     json={
                         "country_code": "CA",
-                        "province_code": "ON",
-                        "regulatory_scope": "provincially_regulated",
                         "effective_from": pay_date.isoformat(),
                     },
                 )

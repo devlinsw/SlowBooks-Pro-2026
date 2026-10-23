@@ -195,6 +195,7 @@ class PayStubResponse(BaseModel):
     reimbursements: float = 0
     net_pay: float = 0
     work_state: Optional[str] = None
+    employee_jurisdiction_snapshot: Optional[dict[str, Any]] = None
     employer_ss_tax: float = 0
     employer_medicare_tax: float = 0
     futa_tax: float = 0

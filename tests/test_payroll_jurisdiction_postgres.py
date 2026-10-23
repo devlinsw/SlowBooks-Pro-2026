@@ -8,19 +8,13 @@ import os
 import threading
 import time
 import uuid
-from datetime import date, timedelta
+from datetime import date
 from threading import current_thread
 
 import pytest
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
-
-from app.models.payroll_jurisdiction import PayrollJurisdiction
-from app.services import payroll_jurisdiction_service
-from app.services.payroll_jurisdiction_service import (
-    add_company_payroll_jurisdiction,
-)
 
 
 _POSTGRES_RACE_ROUTING_QUERY_KEYS = {
@@ -73,24 +67,33 @@ def _validate_postgres_race_database_url(database_url):
     not os.getenv("SLOWBOOKS_TEST_POSTGRES_URL"),
     reason="requires an explicit disposable PostgreSQL test URL",
 )
-def test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypatch):
+def test_company_and_employee_jurisdiction_locks_are_transaction_scoped():
+    """Both jurisdiction tables lock in stable order until transaction end."""
     database_url = os.environ["SLOWBOOKS_TEST_POSTGRES_URL"]
     _validate_postgres_race_database_url(database_url)
+
+    from app.models.employee_payroll_jurisdiction import EmployeePayrollJurisdiction
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+    from app.services.payroll_jurisdiction_service import lock_company_payroll_jurisdiction
 
     schema = f"slowbooks_jurisdiction_test_{uuid.uuid4().hex}"
     admin_engine = create_engine(database_url, pool_pre_ping=True)
     schema_created = False
     engine = None
+    first_acquired = threading.Event()
+    second_attempted = threading.Event()
+    second_acquired = threading.Event()
+    release_first = threading.Event()
+    errors = {}
+    backend_pids = {}
+    state_lock = threading.Lock()
+    workers = []
     try:
         with admin_engine.begin() as connection:
             connection.execute(text(f'CREATE SCHEMA "{schema}"'))
         schema_created = True
-
         engine = create_engine(
-            database_url,
-            isolation_level="READ COMMITTED",
-            pool_size=5,
-            max_overflow=0,
+            database_url, isolation_level="READ COMMITTED", pool_size=3, max_overflow=0
         )
 
         @event.listens_for(engine, "connect")
@@ -99,155 +102,79 @@ def test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypat
             cursor.execute(f'SET search_path TO "{schema}"')
             cursor.close()
 
-        PayrollJurisdiction.__table__.create(engine)
         with engine.begin() as connection:
-            connection.execute(
-                text(
-                    "CREATE TABLE pay_runs ("
-                    "id SERIAL PRIMARY KEY, status VARCHAR(20), pay_date DATE NOT NULL)"
-                )
-            )
+            connection.execute(text("CREATE TABLE employees (id SERIAL PRIMARY KEY)"))
+        PayrollJurisdiction.__table__.create(engine)
+        EmployeePayrollJurisdiction.__table__.create(engine)
         Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=True)
 
         @event.listens_for(engine, "before_cursor_execute")
-        def observe_second_writer_lock(
-            _connection, _cursor, statement, _parameters, _context, _many
-        ):
+        def observe_second_lock(_connection, _cursor, statement, _params, _context, _many):
             if (
-                current_thread().name == "schedule-B"
+                current_thread().name == "lock-B"
                 and "LOCK TABLE COMPANY_PAYROLL_JURISDICTIONS" in statement.upper()
             ):
-                second_writer_entered_lock.set()
+                second_attempted.set()
 
-        today = date.today()
-        first_change = today + timedelta(days=30)
-        later_change = today + timedelta(days=60)
-        with Session() as session:
-            add_company_payroll_jurisdiction(
-                session,
-                country_code="CA",
-                province_code="AB",
-                effective_from=today,
-                regulatory_scope="provincially_regulated",
-            )
-
-        original_ordered_history = payroll_jurisdiction_service._ordered_history
-        first_writer_locked = threading.Event()
-        release_first_writer = threading.Event()
-        second_writer_entered_lock = threading.Event()
-        result_lock = threading.Lock()
-        backend_pids = {}
-        results = {}
-        errors = {}
-
-        def ordered_history_with_barrier(session, *, lock=False):
-            history = original_ordered_history(session, lock=lock)
-            if lock and current_thread().name == "schedule-A":
-                first_writer_locked.set()
-                if not release_first_writer.wait(timeout=15):
-                    raise TimeoutError("timed out waiting to release schedule A")
-            return history
-
-        monkeypatch.setattr(
-            payroll_jurisdiction_service,
-            "_ordered_history",
-            ordered_history_with_barrier,
-        )
-
-        def schedule(name, province, effective_from):
+        def acquire(name):
             try:
                 with Session() as session:
                     pid = session.execute(text("SELECT pg_backend_pid()")).scalar_one()
-                    with result_lock:
+                    with state_lock:
                         backend_pids[name] = pid
-                    result = add_company_payroll_jurisdiction(
-                        session,
-                        country_code="CA",
-                        province_code=province,
-                        effective_from=effective_from,
-                        regulatory_scope="provincially_regulated",
-                    )
-                    with result_lock:
-                        results[name] = result
+                    lock_company_payroll_jurisdiction(session)
+                    if name == "A":
+                        first_acquired.set()
+                        if not release_first.wait(timeout=20):
+                            raise TimeoutError("first jurisdiction lock was not released")
+                    else:
+                        second_acquired.set()
+                    session.commit()
             except BaseException as exc:
-                with result_lock:
-                    errors[name] = exc
+                errors[name] = exc
 
-        writer_a = threading.Thread(
-            name="schedule-A", target=schedule, args=("A", "ON", first_change)
+        first = threading.Thread(name="lock-A", target=acquire, args=("A",), daemon=True)
+        second = threading.Thread(name="lock-B", target=acquire, args=("B",), daemon=True)
+        workers.extend((first, second))
+        first.start()
+        assert first_acquired.wait(timeout=10), "first request did not acquire both locks"
+        second.start()
+        assert second_attempted.wait(timeout=10), "second request did not attempt the locks"
+        assert not second_acquired.is_set(), "second request passed the first transaction lock"
+        with state_lock:
+            second_pid = backend_pids["B"]
+        lock_wait = None
+        deadline = time.monotonic() + 10
+        with admin_engine.connect() as observer:
+            while time.monotonic() < deadline:
+                lock_wait = observer.execute(
+                    text("SELECT wait_event_type, query FROM pg_stat_activity WHERE pid = :pid"),
+                    {"pid": second_pid},
+                ).mappings().one_or_none()
+                if lock_wait and lock_wait["wait_event_type"] == "Lock":
+                    break
+                time.sleep(0.025)
+        assert lock_wait is not None, "second PostgreSQL backend disappeared while waiting"
+        assert lock_wait["wait_event_type"] == "Lock"
+        query = lock_wait["query"].lower()
+        assert query.index("company_payroll_jurisdictions") < query.index(
+            "employee_payroll_jurisdictions"
         )
-        writer_b = threading.Thread(
-            name="schedule-B", target=schedule, args=("B", "BC", later_change)
-        )
-        try:
-            writer_a.start()
-            assert first_writer_locked.wait(timeout=10), "schedule A did not acquire the transaction lock"
-            writer_b.start()
-            assert second_writer_entered_lock.wait(timeout=10), "schedule B did not attempt the table lock"
-
-            with result_lock:
-                second_pid = backend_pids["B"]
-            lock_wait = None
-            deadline = time.monotonic() + 10
-            with admin_engine.connect() as observer:
-                while time.monotonic() < deadline:
-                    lock_wait = observer.execute(
-                        text(
-                            "SELECT wait_event_type, wait_event, query "
-                            "FROM pg_stat_activity WHERE pid = :pid"
-                        ),
-                        {"pid": second_pid},
-                    ).mappings().one_or_none()
-                    if lock_wait and lock_wait["wait_event_type"] == "Lock":
-                        break
-                    time.sleep(0.025)
-            assert lock_wait is not None, "schedule B backend disappeared while waiting"
-            assert lock_wait["wait_event_type"] == "Lock", (
-                "schedule B was not blocked in PostgreSQL on schedule A's table lock: "
-                f"{dict(lock_wait)}"
-            )
-            assert "company_payroll_jurisdictions" in lock_wait["query"]
-        finally:
-            release_first_writer.set()
-            writer_a.join(timeout=15)
-            if writer_b.ident is not None:
-                writer_b.join(timeout=15)
-
-        assert not writer_a.is_alive(), "schedule A did not finish"
-        assert not writer_b.is_alive(), "schedule B did not finish"
-        assert errors == {}, f"concurrent schedules failed: {errors!r}"
-        assert set(results) == {"A", "B"}
-
-        with Session() as session:
-            history = (
-                session.query(PayrollJurisdiction)
-                .order_by(PayrollJurisdiction.effective_from)
-                .all()
-            )
-            assert len(history) == 3
-            assert [item.province_code for item in history] == ["AB", "ON", "BC"]
-            assert [item.effective_from for item in history] == [
-                today,
-                first_change,
-                later_change,
-            ]
-            assert [item.effective_to for item in history] == [
-                first_change - timedelta(days=1),
-                later_change - timedelta(days=1),
-                None,
-            ]
-            assert sum(item.effective_to is None for item in history) == 1
-            assert all(
-                previous.effective_to + timedelta(days=1) == current.effective_from
-                for previous, current in zip(history, history[1:])
-            )
     finally:
+        release_first.set()
+        for worker in workers:
+            if worker.ident is not None:
+                worker.join(timeout=20)
         if engine is not None:
             engine.dispose()
         if schema_created:
             with admin_engine.begin() as connection:
                 connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         admin_engine.dispose()
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert second_acquired.is_set()
+    assert errors == {}
 
 
 @pytest.mark.skipif(
@@ -427,8 +354,6 @@ def test_benefit_seed_waits_for_initial_jurisdiction_activation(monkeypatch, cli
                         "/api/settings/payroll-jurisdiction",
                         json={
                             "country_code": "CA",
-                            "province_code": "ON",
-                            "regulatory_scope": "provincially_regulated",
                             "effective_from": date.today().isoformat(),
                         },
                     )
@@ -582,7 +507,7 @@ def test_schedule_race_preflight_rejects_routing_overrides(
         ValueError,
         match="^PostgreSQL race tests require a direct loopback connection$",
     ) as error:
-        test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypatch)
+        test_company_and_employee_jurisdiction_locks_are_transaction_scoped()
 
     assert str(error.value) == (
         "PostgreSQL race tests require a direct loopback connection"
@@ -615,6 +540,6 @@ def test_schedule_race_preflight_accepts_direct_loopback_url(monkeypatch):
     with pytest.raises(
         AssertionError, match="^race-test preflight reached create_engine$"
     ):
-        test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypatch)
+        test_company_and_employee_jurisdiction_locks_are_transaction_scoped()
 
     assert engine_calls == [True]

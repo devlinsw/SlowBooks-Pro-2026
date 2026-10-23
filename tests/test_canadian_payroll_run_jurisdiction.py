@@ -27,12 +27,11 @@ def _employee(client):
 
 
 def _jurisdiction(client, province, effective_from):
+    # Company mode is country-only; employee province is configured separately.
     return client.post(
         "/api/settings/payroll-jurisdiction",
         json={
             "country_code": "CA",
-            "province_code": province,
-            "regulatory_scope": "provincially_regulated",
             "effective_from": effective_from.isoformat(),
         },
     )
@@ -229,7 +228,7 @@ def test_snapshot_is_copied_and_api_reads_stored_value_after_timeline_changes(
     expected_snapshot = {
         "jurisdiction_id": earlier.id,
         "country_code": "CA",
-        "province_code": "AB",
+        "province_code": None,
         "regulatory_scope": "provincially_regulated",
         "effective_from": today.isoformat(),
         "effective_to": None,
@@ -240,11 +239,11 @@ def test_snapshot_is_copied_and_api_reads_stored_value_after_timeline_changes(
     assert listing.status_code == 200, listing.text
     listed_run = next(item for item in listing.json() if item["id"] == run_id)
     assert listed_run["jurisdiction_snapshot"] == expected_snapshot
-    assert later.province_code == "ON"
+    assert later.province_code is None
     assert later_snapshot == {
         "jurisdiction_id": later.id,
         "country_code": "CA",
-        "province_code": "ON",
+        "province_code": None,
         "regulatory_scope": "provincially_regulated",
         "effective_from": change_date.isoformat(),
         "effective_to": None,

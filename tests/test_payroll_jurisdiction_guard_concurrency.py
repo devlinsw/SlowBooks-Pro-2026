@@ -30,8 +30,6 @@ def _employee_payload():
 def _jurisdiction_payload():
     return {
         "country_code": "CA",
-        "province_code": "ON",
-        "regulatory_scope": "provincially_regulated",
         "effective_from": date.today().isoformat(),
     }
 
