@@ -160,6 +160,18 @@ def _ensure_employee_history_is_reconstructible(bind) -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    stub_snapshot_count = bind.execute(
+        sa.text(
+            "SELECT count(*) FROM pay_stubs "
+            "WHERE employee_jurisdiction_snapshot IS NOT NULL"
+        )
+    ).scalar_one()
+    if stub_snapshot_count:
+        raise RuntimeError(
+            "Cannot downgrade: employee jurisdiction snapshots on pay stubs "
+            "cannot be reconstructed."
+        )
+
     null_company_provinces = bind.execute(
         sa.text(
             "SELECT count(*) FROM company_payroll_jurisdictions "

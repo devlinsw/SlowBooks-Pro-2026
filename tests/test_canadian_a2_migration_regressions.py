@@ -287,3 +287,150 @@ def test_downgrade_refuses_employee_history_for_missing_employee(tmp_path):
             engine.dispose()
         database_path.unlink(missing_ok=True)
         assert not database_path.exists()
+
+
+def test_downgrade_refuses_non_null_stub_jurisdiction_snapshot_without_ddl(
+    tmp_path,
+):
+    from alembic import command
+
+    database_path = tmp_path / "stub-jurisdiction-snapshot.sqlite"
+    assert not database_path.exists()
+    config = _migration_config(database_path)
+    engine = None
+    try:
+        command.upgrade(config, _OLD_HEAD)
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        with engine.begin() as connection:
+            employee_id = _seed_open_company_range(connection, employee=True)
+        engine.dispose()
+        engine = None
+        command.upgrade(config, "head")
+
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        with engine.begin() as connection:
+            pay_run_id = connection.execute(
+                text(
+                    "INSERT INTO pay_runs (period_start, period_end, pay_date) "
+                    "VALUES ('2025-01-01', '2025-01-14', '2025-01-15')"
+                )
+            ).lastrowid
+            connection.execute(
+                text(
+                    "INSERT INTO pay_stubs "
+                    "(pay_run_id, employee_id, employee_jurisdiction_snapshot) "
+                    "VALUES (:pay_run_id, :employee_id, '{}')"
+                ),
+                {"pay_run_id": pay_run_id, "employee_id": employee_id},
+            )
+        engine.dispose()
+        engine = None
+
+        def migration_state(connection):
+            inspector = inspect(connection)
+            stub_schema = tuple(
+                (
+                    column["name"],
+                    str(column["type"]),
+                    column["nullable"],
+                    column["default"],
+                )
+                for column in inspector.get_columns("pay_stubs")
+            )
+            snapshot_present = any(
+                column[0] == "employee_jurisdiction_snapshot"
+                for column in stub_schema
+            )
+            snapshot_rows = (
+                tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        text(
+                            "SELECT id, employee_jurisdiction_snapshot "
+                            "FROM pay_stubs ORDER BY id"
+                        )
+                    ).all()
+                )
+                if snapshot_present
+                else None
+            )
+            return {
+                "employee_history": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        text(
+                            "SELECT employee_id, country_code, province_code, "
+                            "regulatory_scope, effective_from, effective_to, created_at "
+                            "FROM employee_payroll_jurisdictions "
+                            "ORDER BY employee_id, effective_from, id"
+                        )
+                    ).all()
+                )
+                if "employee_payroll_jurisdictions" in inspector.get_table_names()
+                else None,
+                "stub_schema": stub_schema,
+                "stub_snapshot_rows": snapshot_rows,
+                "company_history": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        text(
+                            "SELECT id, country_code, province_code, regulatory_scope, "
+                            "effective_from, effective_to, created_at "
+                            "FROM company_payroll_jurisdictions "
+                            "ORDER BY effective_from, id"
+                        )
+                    ).all()
+                ),
+                "company_indexes": tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        text(
+                            "SELECT name, sql FROM sqlite_master "
+                            "WHERE type = 'index' "
+                            "AND tbl_name = 'company_payroll_jurisdictions' "
+                            "ORDER BY name"
+                        )
+                    ).all()
+                ),
+                "revision": connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one(),
+            }
+
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        with engine.connect() as connection:
+            before = migration_state(connection)
+        engine.dispose()
+        engine = None
+
+        downgrade_error = None
+        try:
+            command.downgrade(config, _OLD_HEAD)
+        except RuntimeError as exc:
+            downgrade_error = exc
+
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        with engine.connect() as connection:
+            after = migration_state(connection)
+        engine.dispose()
+        engine = None
+
+        assert downgrade_error is not None, (
+            "downgrade must reject a non-NULL employee snapshot before DDL; "
+            f"got {downgrade_error!r}; before={before!r}; after={after!r}"
+        )
+        assert "snapshot" in str(downgrade_error).lower()
+        assert after == before, (
+            "downgrade failure changed employee history, pay-stub snapshot/schema, "
+            "company history/index, or Alembic revision; "
+            f"before={before!r}; after={after!r}"
+        )
+        assert before["stub_snapshot_rows"] == ((1, "{}"),)
+        assert before["revision"] == _MIGRATION_HEAD
+    finally:
+        if engine is not None:
+            engine.dispose()
+        database_path.unlink(missing_ok=True)
+        database_path.with_name(database_path.name + "-wal").unlink(missing_ok=True)
+        database_path.with_name(database_path.name + "-shm").unlink(missing_ok=True)
+        assert not database_path.exists()

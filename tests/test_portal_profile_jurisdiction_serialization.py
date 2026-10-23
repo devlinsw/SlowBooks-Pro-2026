@@ -126,6 +126,8 @@ def test_portal_profile_get_and_canadian_activation_serialize(
     release_profile_render = Event()
     profile_done = Event()
     activation_done = Event()
+    profile_lock_returned = Event()
+    profile_employee_read = Event()
     results = {}
     errors = {}
     profile_lock_count = 0
@@ -148,6 +150,7 @@ def test_portal_profile_get_and_canadian_activation_serialize(
                     second_profile_lock_attempted.set()
             elif upper.lstrip().startswith("SELECT") and "FROM EMPLOYEES" in upper:
                 profile_sql_order.append("employee_read")
+                profile_employee_read.set()
             elif upper.lstrip().startswith("SELECT") and "FROM COMPANY_PAYROLL_JURISDICTIONS" in upper:
                 profile_sql_order.append("jurisdiction_read")
         elif role == "activation" and is_company_lock:
@@ -165,6 +168,19 @@ def test_portal_profile_get_and_canadian_activation_serialize(
     event.listen(SessionClass, "after_begin", tag_connection)
     event.listen(engine, "before_cursor_execute", observe_sql)
     event.listen(SessionClass, "before_commit", pause_activation_commit)
+    original_profile_lock = portal_routes.lock_company_payroll_jurisdiction
+
+    def observe_profile_lock_return(db):
+        result = original_profile_lock(db)
+        if db.info.get("race_role") == "profile":
+            profile_lock_returned.set()
+        return result
+
+    monkeypatch.setattr(
+        portal_routes,
+        "lock_company_payroll_jurisdiction",
+        observe_profile_lock_return,
+    )
     original_render = portal_routes._render
 
     def pause_profile_render(name, db, **context):
@@ -208,9 +224,25 @@ def test_portal_profile_get_and_canadian_activation_serialize(
             assert activation_before_commit.wait(timeout=10), (
                 "activation did not reach its locked pre-commit state"
             )
+            assert activation_lock_attempted.is_set(), (
+                "activation did not acquire the shared lock before the profile GET started"
+            )
             profile_thread.start()
             assert profile_lock_attempted.wait(timeout=10), (
                 "profile GET did not acquire the jurisdiction lock before authentication reads"
+            )
+            assert not profile_lock_returned.wait(timeout=0.25), (
+                "profile GET returned from the shared-lock call while activation "
+                "still held its transaction"
+            )
+            assert not profile_employee_read.is_set(), (
+                "profile GET read the employee while activation held the shared lock"
+            )
+            assert not profile_done.is_set(), (
+                "profile GET completed while activation held the shared lock"
+            )
+            assert not activation_done.is_set(), (
+                "activation released its transaction before the GET blocking check"
             )
             release_activation.set()
         else:
