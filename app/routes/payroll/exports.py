@@ -57,9 +57,10 @@ def _require_us_output_period(db: Session, run: PayRun) -> None:
 
 
 def _paystub_ytd_contributors(db: Session, stub: PayStub, run: PayRun) -> list[PayStub]:
-    from app.routes.payroll.ytd import _ytd_stubs
+    from app.routes.payroll.ytd import _reject_orphan_ytd_stubs, _ytd_stubs
 
     try:
+        _reject_orphan_ytd_stubs(db, stub.employee_id)
         candidates = _ytd_stubs(db, stub.employee_id, run.pay_date.year)
         contributors = []
         contributor_runs = []

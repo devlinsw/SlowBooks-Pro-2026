@@ -219,6 +219,69 @@ def test_paystub_blocks_when_ytd_includes_legacy_canadian_run_before_ytd_or_pdf(
     ytd_spy.assert_not_called()
 
 
+def test_paystub_rejects_orphan_history_before_ytd_or_pdf(
+    client, db_session, monkeypatch
+):
+    from app.routes.payroll import exports
+    from app.services import paystub_pdf
+
+    employee = _employee(client)
+    pay_date = date.today()
+    target_run, target_stub = _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=pay_date - timedelta(days=14),
+        period_end=pay_date - timedelta(days=1),
+        pay_date=pay_date,
+        gross=1000,
+        federal=100,
+    )
+    orphan_stub = PayStub(
+        pay_run_id=999999,
+        employee_id=employee["id"],
+        gross_pay=90000,
+        net_pay=70000,
+    )
+    db_session.add(orphan_stub)
+    db_session.commit()
+
+    before_runs = db_session.query(
+        PayRun.id, PayRun.status, PayRun.total_gross, PayRun.total_net
+    ).order_by(PayRun.id).all()
+    before_stubs = db_session.query(
+        PayStub.id,
+        PayStub.pay_run_id,
+        PayStub.employee_id,
+        PayStub.gross_pay,
+        PayStub.net_pay,
+    ).filter(PayStub.employee_id == employee["id"]).order_by(PayStub.id).all()
+    pdf_spy = Mock(return_value=b"unsafe PDF")
+    ytd_spy = Mock(wraps=exports.employee_ytd)
+    monkeypatch.setattr(paystub_pdf, "generate_paystub_pdf", pdf_spy)
+    monkeypatch.setattr(exports, "employee_ytd", ytd_spy)
+
+    response = client.get(
+        f"/api/payroll/{target_run.id}/paystub/{target_stub.id}"
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == (
+        "Payroll YTD history is ambiguous; a stub has no parent pay run."
+    )
+    ytd_spy.assert_not_called()
+    pdf_spy.assert_not_called()
+    assert db_session.query(
+        PayRun.id, PayRun.status, PayRun.total_gross, PayRun.total_net
+    ).order_by(PayRun.id).all() == before_runs
+    assert db_session.query(
+        PayStub.id,
+        PayStub.pay_run_id,
+        PayStub.employee_id,
+        PayStub.gross_pay,
+        PayStub.net_pay,
+    ).filter(PayStub.employee_id == employee["id"]).order_by(PayStub.id).all() == before_stubs
+
+
 def test_paystub_ytd_excludes_later_canadian_period_and_keeps_safe_pdf(
     client, db_session, monkeypatch
 ):

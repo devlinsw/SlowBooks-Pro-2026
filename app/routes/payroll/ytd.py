@@ -40,6 +40,21 @@ def _ytd_stubs(
     return q.all()
 
 
+def _reject_orphan_ytd_stubs(db: Session, employee_id: int) -> None:
+    """Fail closed when any employee pay stub has no parent run."""
+    missing_parent = (
+        db.query(PayStub.id)
+        .outerjoin(PayRun, PayStub.pay_run_id == PayRun.id)
+        .filter(PayStub.employee_id == employee_id, PayRun.id.is_(None))
+        .first()
+    )
+    if missing_parent is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll YTD history is ambiguous; a stub has no parent pay run.",
+        )
+
+
 def _validate_us_ytd_contributor(db: Session, run: PayRun | None) -> None:
     """Reject a missing, Canadian, boundary, or ambiguous source run."""
     if run is None:
@@ -83,17 +98,7 @@ def _validated_ytd_stubs(
         ) from exc
 
     try:
-        missing_parent = (
-            db.query(PayStub.id)
-            .outerjoin(PayRun, PayStub.pay_run_id == PayRun.id)
-            .filter(PayStub.employee_id == employee_id, PayRun.id.is_(None))
-            .first()
-        )
-        if missing_parent is not None:
-            raise HTTPException(
-                status_code=409,
-                detail="Payroll YTD history is ambiguous; a stub has no parent pay run.",
-            )
+        _reject_orphan_ytd_stubs(db, employee_id)
         stubs = _ytd_stubs(db, employee_id, year, before)
     except HTTPException:
         raise
