@@ -48,6 +48,7 @@ from app.routes import (
     banking,
     reports,
     settings,
+    payroll_jurisdiction,
     iif,
 )
 
@@ -1159,6 +1160,7 @@ app.include_router(sales_receipts.router)
 app.include_router(banking.router)
 app.include_router(reports.router)
 app.include_router(settings.router)
+app.include_router(payroll_jurisdiction.router)
 app.include_router(iif.router)
 
 # Phase 1: Foundation

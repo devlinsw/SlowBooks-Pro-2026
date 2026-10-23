@@ -34,6 +34,14 @@ from app.routes.pto import cancel_pto_request
 from app.services import file_store
 from app.services.encryption import encrypt
 from app.services.nacha_export import validate_routing_number
+from app.services.payroll_jurisdiction_service import (
+    PayrollJurisdictionAmbiguous,
+    SUPPORTED_COUNTRY,
+    SUPPORTED_PROVINCES,
+    SUPPORTED_SCOPE,
+    lock_company_payroll_jurisdiction,
+    resolve_company_payroll_jurisdiction,
+)
 from app.services.rate_limit import limiter
 from app.services.request_utils import client_ip as _client_ip
 from app.services.settings_service import get_all_settings
@@ -69,7 +77,7 @@ def _to_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
-def _get_employee(token: str, db: Session) -> Employee:
+def _get_employee(token: str, db: Session, *, commit: bool = True) -> Employee:
     """Resolve a portal token to an active, non-expired employee, or HTTPException.
 
     Updates `portal_token_last_used` on every successful lookup. 90-day idle
@@ -100,10 +108,11 @@ def _get_employee(token: str, db: Session) -> Employee:
     employee.portal_token_last_used = now
     if employee.portal_token is None:
         # Its encrypted copy was saved under a payroll key this install no
-        # longer has: the link just proved itself, so keep it again under
-        # the key it has now, for the cookie and for an administrator.
+        # longer has: the link just proved itself, so keep it again under the
+        # key it has now, for the cookie and for an administrator.
         employee.portal_token = token
-    db.commit()
+    if commit:
+        db.commit()
     return employee
 
 
@@ -189,10 +198,21 @@ def _redact_portal_path(path: str) -> str:
 
 
 def _record_portal_access(
-    db: Session, request: Request, employee_id: int | None, success: bool
+    db: Session,
+    request: Request,
+    employee_id: int | None,
+    success: bool,
+    *,
+    commit: bool = True,
+    fail_closed: bool = False,
 ) -> None:
-    """Insert one portal_accesses row. Swallows write failures so the audit
-    write can never break the request itself."""
+    """Insert one portal_accesses row.
+
+    Ordinary portal handlers and W-4 saves commit the audit row immediately.
+    W-4 saves then reacquire the shared jurisdiction lock for the final check
+    and profile write, so a later Canadian guard rejection cannot erase the
+    successful authentication audit or token-use update.
+    """
     try:
         db.add(
             PortalAccess(
@@ -203,12 +223,27 @@ def _record_portal_access(
                 success=success,
             )
         )
-        db.commit()
+        if commit:
+            db.commit()
     except Exception:
-        db.rollback()
+        if commit:
+            db.rollback()
+            if fail_closed:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Portal access could not be recorded; profile changes were not saved.",
+                ) from None
+        else:
+            raise
 
 
-def _employee_from_cookie(request: Request, db: Session) -> Employee:
+def _employee_from_cookie(
+    request: Request,
+    db: Session,
+    *,
+    commit: bool = True,
+    audit_required: bool = False,
+) -> Employee:
     """Resolve the employee from the portal cookie, or 401 if absent / invalid.
 
     Records a portal_accesses row on every call — success and failure both
@@ -222,11 +257,18 @@ def _employee_from_cookie(request: Request, db: Session) -> Employee:
             detail="Portal session required — open the link from your email again",
         )
     try:
-        emp = _get_employee(token, db)
+        emp = _get_employee(token, db, commit=commit)
     except HTTPException:
         _record_portal_access(db, request, employee_id=None, success=False)
         raise
-    _record_portal_access(db, request, employee_id=emp.id, success=True)
+    _record_portal_access(
+        db,
+        request,
+        employee_id=emp.id,
+        success=True,
+        commit=commit,
+        fail_closed=audit_required,
+    )
     return emp
 
 
@@ -245,6 +287,57 @@ def _processed_stub_count(emp: Employee) -> int:
 # resolve the employee and how they render success/error (cookie stamping is
 # only needed on the token-URL path).
 # ---------------------------------------------------------------------------
+
+
+_CANADIAN_PROFILE_UNAVAILABLE = (
+    "Canadian employee setup is unavailable. Do not enter US W-4, state, or "
+    "Social Security data. Canadian tax setup is not provided here."
+)
+
+
+def _employee_profile_jurisdiction(db: Session) -> str:
+    """Return us/canada for today's jurisdiction; reject uncertain history."""
+    try:
+        jurisdiction = resolve_company_payroll_jurisdiction(db, date.today())
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll jurisdiction could not be confirmed because its history is ambiguous.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; the US profile is blocked.",
+        ) from exc
+
+    if jurisdiction is None:
+        return "us"
+    if (
+        jurisdiction.country_code != SUPPORTED_COUNTRY
+        or jurisdiction.province_code not in SUPPORTED_PROVINCES
+        or jurisdiction.regulatory_scope != SUPPORTED_SCOPE
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll jurisdiction could not be confirmed because its history is invalid.",
+        )
+    return "canada"
+
+
+def _lock_us_employee_profile(db: Session) -> None:
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; the US profile is blocked.",
+        ) from exc
+
+
+def _guard_us_employee_profile(db: Session) -> None:
+    _lock_us_employee_profile(db)
+    if _employee_profile_jurisdiction(db) == "canada":
+        raise HTTPException(status_code=422, detail=_CANADIAN_PROFILE_UNAVAILABLE)
 
 
 def _save_profile(
@@ -408,12 +501,18 @@ def portal_paystubs(request: Request, db: Session = Depends(get_db)):
 @limiter.limit("30/minute")
 def portal_profile(request: Request, saved: int = 0, db: Session = Depends(get_db)):
     emp = _employee_from_cookie(request, db)
+    try:
+        profile_jurisdiction = _employee_profile_jurisdiction(db)
+    except HTTPException:
+        db.rollback()
+        profile_jurisdiction = "unavailable"
     return _render(
         "profile.html",
         db,
         emp=emp,
         filing_statuses=list(FilingStatus),
         saved=saved,
+        profile_jurisdiction=profile_jurisdiction,
     )
 
 
@@ -434,7 +533,9 @@ def portal_profile_save(
     zip: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    emp = _employee_from_cookie(request, db)
+    _lock_us_employee_profile(db)
+    emp = _employee_from_cookie(request, db, audit_required=True)
+    _guard_us_employee_profile(db)
     _save_profile(
         emp,
         filing_status=filing_status,
@@ -679,18 +780,32 @@ def portal_claim_pto(request: Request, token: str, db: Session = Depends(get_db)
 # POST routes with token in the URL — process inline, stamp the cookie, then
 # redirect to the cookieless URL. Browsers can't redirect a POST across paths
 # cleanly, so we do the work first and 303 to the GET equivalent.
-def _employee_from_token(request: Request, token: str, db: Session) -> Employee:
+def _employee_from_token(
+    request: Request,
+    token: str,
+    db: Session,
+    *,
+    commit: bool = True,
+    audit_required: bool = False,
+) -> Employee:
     """_get_employee + portal_accesses audit row, mirroring the cookie path.
 
     The token-URL POST handlers mutate the most sensitive data the portal
     holds (W-4 elections, direct-deposit accounts) — they must show up in
     the audit trail exactly like their cookie-based twins."""
     try:
-        emp = _get_employee(token, db)
+        emp = _get_employee(token, db, commit=commit)
     except HTTPException:
         _record_portal_access(db, request, employee_id=None, success=False)
         raise
-    _record_portal_access(db, request, employee_id=emp.id, success=True)
+    _record_portal_access(
+        db,
+        request,
+        employee_id=emp.id,
+        success=True,
+        commit=commit,
+        fail_closed=audit_required,
+    )
     return emp
 
 
@@ -721,7 +836,9 @@ def portal_claim_profile_save(
     zip: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    emp = _employee_from_token(request, token, db)
+    _lock_us_employee_profile(db)
+    emp = _employee_from_token(request, token, db, audit_required=True)
+    _guard_us_employee_profile(db)
     _save_profile(
         emp,
         filing_status=filing_status,
