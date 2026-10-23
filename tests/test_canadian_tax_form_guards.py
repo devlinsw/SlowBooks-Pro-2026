@@ -379,15 +379,16 @@ def test_legacy_tax_forms_keep_populated_safe_history_after_canada_activation(
     liability = json_responses["liability"].json()
     assert liability["num_stubs"] == 1
     assert liability["total_due"] == 284.0
-    assert [
-        (item["form"], item["amount"]) for item in liability["liabilities"]
-    ] == [
-        ("941", 253.0),
-        ("940", 6.0),
-        ("State SUI", 5.0),
-        ("State WH", 20.0),
-        ("State Other", 0.0),
-    ]
+    assert len(liability["liabilities"]) == 5
+    assert {
+        item["form"]: item["amount"] for item in liability["liabilities"]
+    } == {
+        "941": 253.0,
+        "940": 6.0,
+        "State SUI": 5.0,
+        "State WH": 20.0,
+        "State Other": 0.0,
+    }
 
     renderers = {
         "941": (tax_forms.form_941, "generate_941_pdf", "total_wages"),
