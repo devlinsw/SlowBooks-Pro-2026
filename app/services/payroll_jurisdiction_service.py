@@ -136,13 +136,13 @@ def _validate_history(history):
         )
 
 
-def resolve_company_payroll_jurisdiction(db, as_of: date):
+def resolve_company_payroll_jurisdiction(db, as_of: date, *, lock=False):
     """Return the Canadian country mode effective on a date, or ``None``.
 
     Legacy company province values remain stored for audit and migration
     rollback, but are deliberately masked from all new readers and snapshots.
     """
-    history = _ordered_history(db)
+    history = _ordered_history(db, lock=lock)
     _validate_history(history)
     matches = [
         item
@@ -358,6 +358,14 @@ def add_employee_payroll_jurisdiction(
         raise PayrollJurisdictionError("effective_from must be 2026-01-01 or later.")
 
     lock_company_payroll_jurisdiction(db)
+    company_mode = resolve_company_payroll_jurisdiction(
+        db, effective_from, lock=True
+    )
+    if company_mode is None:
+        raise PayrollJurisdictionError(
+            "Canadian country mode must be effective on the employee province assignment date."
+        )
+
     if db.query(Employee.id).filter(Employee.id == employee_id).first() is None:
         raise PayrollJurisdictionError(f"Employee {employee_id} does not exist.")
 

@@ -105,6 +105,45 @@ def upgrade() -> None:
     )
 
 
+def _ensure_employee_history_is_reconstructible(bind) -> None:
+    """Refuse rollback if employee timelines cannot be rebuilt from company history."""
+    company_history = [
+        tuple(row)
+        for row in bind.execute(
+            sa.text(
+                "SELECT country_code, province_code, regulatory_scope, "
+                "effective_from, effective_to "
+                "FROM company_payroll_jurisdictions ORDER BY effective_from, id"
+            )
+        ).all()
+    ]
+    employee_ids = set(
+        bind.execute(sa.text("SELECT id FROM employees ORDER BY id")).scalars().all()
+    )
+    employee_histories = {employee_id: [] for employee_id in employee_ids}
+    employee_rows = bind.execute(
+        sa.text(
+            "SELECT employee_id, country_code, province_code, regulatory_scope, "
+            "effective_from, effective_to "
+            "FROM employee_payroll_jurisdictions "
+            "ORDER BY employee_id, effective_from, id"
+        )
+    ).all()
+    for row in employee_rows:
+        employee_id = row[0]
+        if employee_id not in employee_histories:
+            raise RuntimeError(
+                "Cannot downgrade: employee jurisdiction history has no matching employee."
+            )
+        employee_histories[employee_id].append(tuple(row[1:]))
+
+    if any(history != company_history for history in employee_histories.values()):
+        raise RuntimeError(
+            "Cannot downgrade: employee province history differs from legacy "
+            "company history; employee-specific data cannot be reconstructed."
+        )
+
+
 def downgrade() -> None:
     bind = op.get_bind()
     null_company_provinces = bind.execute(
@@ -117,6 +156,8 @@ def downgrade() -> None:
         raise RuntimeError(
             "Cannot downgrade: country-mode company rows have no province to restore."
         )
+
+    _ensure_employee_history_is_reconstructible(bind)
 
     op.drop_column("pay_stubs", "employee_jurisdiction_snapshot")
     op.drop_index(

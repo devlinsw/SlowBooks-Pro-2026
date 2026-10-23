@@ -2,6 +2,7 @@
 
 from datetime import date, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -26,6 +27,14 @@ def _employee(db_session, first_name="Test", last_name="Employee"):
     db_session.add(employee)
     db_session.commit()
     return employee
+
+
+def _company_mode(db_session, effective_from):
+    from app.services.payroll_jurisdiction_service import add_company_payroll_jurisdiction
+
+    return add_company_payroll_jurisdiction(
+        db_session, country_code="CA", effective_from=effective_from
+    )
 
 
 def test_company_country_mode_does_not_require_or_report_legacy_province(client, db_session):
@@ -138,6 +147,7 @@ def test_employee_resolver_accepts_single_province_pay_period_and_rejects_change
 
     today = date.today()
     employee = _employee(db_session)
+    _company_mode(db_session, today)
     change_date = today + timedelta(days=20)
     add_employee_payroll_jurisdiction(
         db_session,
@@ -177,6 +187,7 @@ def test_employee_resolver_rejects_period_without_continuous_coverage(
 
     today = date.today()
     employee = _employee(db_session)
+    _company_mode(db_session, today)
     add_employee_payroll_jurisdiction(
         db_session,
         employee_id=employee.id,
@@ -199,6 +210,7 @@ def test_employee_province_history_dates_are_prospective_and_contiguous(
 
     today = date.today()
     employee = _employee(db_session)
+    _company_mode(db_session, today)
     backdated = client.post(
         f"/api/settings/payroll-jurisdiction/employees/{employee.id}",
         json=_employee_province_payload("AB", today - timedelta(days=1)),
@@ -243,6 +255,7 @@ def test_employee_province_change_cannot_reinterpret_processed_pay_period(
 
     today = date.today()
     employee = _employee(db_session)
+    _company_mode(db_session, today)
     period_start = today + timedelta(days=4)
     effective_from = period_start + timedelta(days=2)
     run = PayRun(
@@ -542,5 +555,380 @@ def test_employee_jurisdiction_migration_backfills_all_employees_without_rewriti
     finally:
         if engine is not None:
             engine.dispose()
+        database_path.unlink(missing_ok=True)
+        assert not database_path.exists()
+
+
+def test_employee_province_assignment_requires_effective_company_country_mode(
+    db_session,
+):
+    from app.models.employee_payroll_jurisdiction import EmployeePayrollJurisdiction
+    from app.services.payroll_jurisdiction_service import (
+        PayrollJurisdictionError,
+        add_employee_payroll_jurisdiction,
+    )
+
+    employee = _employee(db_session)
+    employee_id = cast(int, employee.id)
+    today = date.today()
+
+    with pytest.raises(PayrollJurisdictionError, match="country mode must be effective"):
+        add_employee_payroll_jurisdiction(
+            db_session,
+            employee_id=employee_id,
+            country_code="CA",
+            province_code="AB",
+            regulatory_scope="provincially_regulated",
+            effective_from=today,
+        )
+
+    assert db_session.query(EmployeePayrollJurisdiction).count() == 0
+
+
+def test_employee_province_assignment_cannot_precede_scheduled_company_mode(
+    db_session,
+):
+    from app.models.employee_payroll_jurisdiction import EmployeePayrollJurisdiction
+    from app.services.payroll_jurisdiction_service import (
+        PayrollJurisdictionError,
+        add_company_payroll_jurisdiction,
+        add_employee_payroll_jurisdiction,
+    )
+
+    today = date.today()
+    add_company_payroll_jurisdiction(
+        db_session, country_code="CA", effective_from=today + timedelta(days=10)
+    )
+    employee = _employee(db_session)
+    employee_id = cast(int, employee.id)
+
+    with pytest.raises(PayrollJurisdictionError, match="country mode must be effective"):
+        add_employee_payroll_jurisdiction(
+            db_session,
+            employee_id=employee_id,
+            country_code="CA",
+            province_code="ON",
+            regulatory_scope="provincially_regulated",
+            effective_from=today,
+        )
+
+    assert db_session.query(EmployeePayrollJurisdiction).count() == 0
+
+
+@pytest.mark.parametrize(
+    ("mode_offset", "assignment_offset"),
+    [(5, 5), (0, 0), (0, 2)],
+    ids=["exact-mode-start", "active-on-mode-start", "active-after-mode-start"],
+)
+def test_employee_province_assignment_accepts_effective_company_mode_date(
+    db_session, mode_offset, assignment_offset
+):
+    from app.models.employee_payroll_jurisdiction import EmployeePayrollJurisdiction
+    from app.services.payroll_jurisdiction_service import (
+        add_company_payroll_jurisdiction,
+        add_employee_payroll_jurisdiction,
+    )
+
+    today = date.today()
+    mode_start = today + timedelta(days=mode_offset)
+    assignment_start = today + timedelta(days=assignment_offset)
+    add_company_payroll_jurisdiction(
+        db_session, country_code="CA", effective_from=mode_start
+    )
+    employee = _employee(db_session)
+
+    result = add_employee_payroll_jurisdiction(
+        db_session,
+        employee_id=cast(int, employee.id),
+        country_code="CA",
+        province_code="AB",
+        regulatory_scope="provincially_regulated",
+        effective_from=assignment_start,
+    )
+
+    assert result["effective_from"] == assignment_start.isoformat()
+    assignments = db_session.query(EmployeePayrollJurisdiction).all()
+    assert len(assignments) == 1
+    assert assignments[0].effective_from == assignment_start
+
+
+def _prepare_employee_jurisdiction_downgrade_database(
+    database_path, *, employee_count, company_history
+):
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import create_engine, text
+
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    config.attributes["database_url"] = f"sqlite:///{database_path.as_posix()}"
+    command.upgrade(config, "06ae9f5dc58e")
+
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    employee_ids = []
+    try:
+        with engine.begin() as connection:
+            for index in range(employee_count):
+                result = connection.execute(
+                    text(
+                        "INSERT INTO employees (first_name, last_name) "
+                        "VALUES (:first_name, 'Worker')"
+                    ),
+                    {"first_name": f"Worker{index}"},
+                )
+                employee_ids.append(result.lastrowid)
+            for province, start, end in company_history:
+                connection.execute(
+                    text(
+                        "INSERT INTO company_payroll_jurisdictions "
+                        "(country_code, province_code, regulatory_scope, "
+                        "effective_from, effective_to) "
+                        "VALUES ('CA', :province, 'provincially_regulated', "
+                        ":start, :end)"
+                    ),
+                    {"province": province, "start": start, "end": end},
+                )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    return config, employee_ids
+
+
+def _employee_jurisdiction_downgrade_state(database_path):
+    from alembic.config import Config
+    from sqlalchemy import create_engine, inspect, text
+
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    config.attributes["database_url"] = f"sqlite:///{database_path.as_posix()}"
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            tables = set(inspector.get_table_names())
+            version = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            company_province = next(
+                (
+                    column
+                    for column in inspector.get_columns("company_payroll_jurisdictions")
+                    if column["name"] == "province_code"
+                ),
+                None,
+            )
+            company_rows = connection.execute(
+                text(
+                    "SELECT country_code, province_code, regulatory_scope, "
+                    "effective_from, effective_to "
+                    "FROM company_payroll_jurisdictions ORDER BY effective_from"
+                )
+            ).all()
+            employee_rows = None
+            if "employee_payroll_jurisdictions" in tables:
+                employee_rows = connection.execute(
+                    text(
+                        "SELECT employee_id, country_code, province_code, regulatory_scope, "
+                        "effective_from, effective_to "
+                        "FROM employee_payroll_jurisdictions "
+                        "ORDER BY employee_id, effective_from"
+                    )
+                ).all()
+            snapshot_column = (
+                "employee_jurisdiction_snapshot"
+                in {column["name"] for column in inspector.get_columns("pay_stubs")}
+            )
+            return {
+                "version": version,
+                "tables": tables,
+                "company_province_nullable": (
+                    company_province["nullable"] if company_province else None
+                ),
+                "company_rows": [tuple(row) for row in company_rows],
+                "employee_rows": (
+                    [tuple(row) for row in employee_rows]
+                    if employee_rows is not None
+                    else None
+                ),
+                "snapshot_column": snapshot_column,
+            }
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("scenario", "employee_count", "company_history"),
+    [
+        (
+            "diverged-employee-history",
+            1,
+            [("AB", "2024-01-01", "2024-12-31"), ("ON", "2025-01-01", None)],
+        ),
+        ("employee-history-without-company-timeline", 1, []),
+    ],
+    ids=["diverged-employee-history", "employee-without-company-timeline"],
+)
+def test_employee_jurisdiction_downgrade_refuses_loss_without_mutation(
+    tmp_path, scenario, employee_count, company_history
+):
+    from alembic import command
+    from sqlalchemy import create_engine, text
+
+    database_path = tmp_path / f"{scenario}.db"
+    assert not database_path.exists()
+    try:
+        config, employee_ids = _prepare_employee_jurisdiction_downgrade_database(
+            database_path,
+            employee_count=employee_count,
+            company_history=company_history,
+        )
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        try:
+            with engine.begin() as connection:
+                if scenario == "diverged-employee-history":
+                    connection.execute(
+                        text(
+                            "UPDATE employee_payroll_jurisdictions "
+                            "SET province_code = 'BC' WHERE employee_id = :employee_id "
+                            "AND effective_from = '2024-01-01'"
+                        ),
+                        {"employee_id": employee_ids[0]},
+                    )
+                else:
+                    connection.execute(
+                        text(
+                            "INSERT INTO employee_payroll_jurisdictions "
+                            "(employee_id, country_code, province_code, regulatory_scope, "
+                            "effective_from, effective_to) "
+                            "VALUES (:employee_id, 'CA', 'AB', 'provincially_regulated', "
+                            "'2025-01-01', NULL)"
+                        ),
+                        {"employee_id": employee_ids[0]},
+                    )
+        finally:
+            engine.dispose()
+
+        before = _employee_jurisdiction_downgrade_state(database_path)
+        downgrade_error = None
+        try:
+            command.downgrade(config, "06ae9f5dc58e")
+        except RuntimeError as error:
+            downgrade_error = str(error)
+
+        state = _employee_jurisdiction_downgrade_state(database_path)
+        assert downgrade_error is not None, (
+            "downgrade returned without refusing employee-history loss; "
+            f"observed state: {state}"
+        )
+        assert "employee" in downgrade_error.lower()
+        assert state == before
+        assert state["version"] == "d8c2f4a61b90"
+        assert "employee_payroll_jurisdictions" in state["tables"]
+        assert state["company_province_nullable"] is True
+        assert state["snapshot_column"] is True
+        if scenario == "diverged-employee-history":
+            assert state["employee_rows"] == [
+                (
+                    employee_ids[0],
+                    "CA",
+                    "BC",
+                    "provincially_regulated",
+                    "2024-01-01",
+                    "2024-12-31",
+                ),
+                (
+                    employee_ids[0],
+                    "CA",
+                    "ON",
+                    "provincially_regulated",
+                    "2025-01-01",
+                    None,
+                ),
+            ]
+        else:
+            assert state["employee_rows"] == [
+                (
+                    employee_ids[0],
+                    "CA",
+                    "AB",
+                    "provincially_regulated",
+                    "2025-01-01",
+                    None,
+                )
+            ]
+            assert state["company_rows"] == []
+    finally:
+        database_path.unlink(missing_ok=True)
+        assert not database_path.exists()
+
+
+def test_employee_jurisdiction_downgrade_preserves_identical_backfilled_history(
+    tmp_path,
+):
+    from alembic import command
+    from sqlalchemy import create_engine, inspect, text
+
+    database_path = tmp_path / "identical-backfilled-history.db"
+    assert not database_path.exists()
+    expected_company_history = [
+        ("AB", "2024-01-01", "2024-12-31"),
+        ("ON", "2025-01-01", None),
+    ]
+    try:
+        config, employee_ids = _prepare_employee_jurisdiction_downgrade_database(
+            database_path,
+            employee_count=2,
+            company_history=expected_company_history,
+        )
+        before = _employee_jurisdiction_downgrade_state(database_path)
+        assert before["employee_rows"] == [
+            (
+                employee_id,
+                "CA",
+                province,
+                "provincially_regulated",
+                start,
+                end,
+            )
+            for employee_id in employee_ids
+            for province, start, end in expected_company_history
+        ]
+
+        command.downgrade(config, "06ae9f5dc58e")
+
+        engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+        try:
+            with engine.connect() as connection:
+                inspector = inspect(connection)
+                tables = set(inspector.get_table_names())
+                revision = connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+                company_province = next(
+                    column
+                    for column in inspector.get_columns("company_payroll_jurisdictions")
+                    if column["name"] == "province_code"
+                )
+                company_history = connection.execute(
+                    text(
+                        "SELECT province_code, effective_from, effective_to "
+                        "FROM company_payroll_jurisdictions ORDER BY effective_from"
+                    )
+                ).all()
+                stub_columns = {
+                    column["name"] for column in inspector.get_columns("pay_stubs")
+                }
+        finally:
+            engine.dispose()
+
+        assert revision == "06ae9f5dc58e"
+        assert "employee_payroll_jurisdictions" not in tables
+        assert company_province["nullable"] is False
+        assert "employee_jurisdiction_snapshot" not in stub_columns
+        assert [tuple(row) for row in company_history] == expected_company_history
+    finally:
         database_path.unlink(missing_ok=True)
         assert not database_path.exists()
