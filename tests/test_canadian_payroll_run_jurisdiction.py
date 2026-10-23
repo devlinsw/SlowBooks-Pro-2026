@@ -37,12 +37,20 @@ def _jurisdiction(client, province, effective_from):
     )
 
 
-def _run(client, employee_id, pay_date, *, use_time_entries=False):
+def _run(
+    client,
+    employee_id,
+    pay_date,
+    *,
+    period_start=None,
+    period_end=None,
+    use_time_entries=False,
+):
     return client.post(
         "/api/payroll",
         json={
-            "period_start": pay_date.isoformat(),
-            "period_end": pay_date.isoformat(),
+            "period_start": (period_start or pay_date).isoformat(),
+            "period_end": (period_end or pay_date).isoformat(),
             "pay_date": pay_date.isoformat(),
             "stubs": [
                 {
@@ -132,6 +140,106 @@ def test_future_only_jurisdiction_keeps_pre_start_us_pay_run_legacy_behavior(
     assert db_session.query(PayRun).count() == 1
     assert db_session.query(PayRun).one().jurisdiction_snapshot is None
     assert db_session.query(PayStub).count() == 1
+
+
+def test_create_period_crossing_canadian_activation_fails_before_us_calculation(
+    client, db_session, monkeypatch
+):
+    from app.models.payroll import PayRun, PayStub
+    from app.routes.payroll import runs as payroll_runs
+
+    employee = _employee(client)
+    effective_from = date(2026, 10, 25)
+    configured = _jurisdiction(client, "AB", effective_from)
+    assert configured.status_code == 201, configured.text
+
+    calculator_calls = []
+    real_calculator = payroll_runs.calculate_withholdings
+
+    def calculator_spy(*args, **kwargs):
+        calculator_calls.append((args, kwargs))
+        return real_calculator(*args, **kwargs)
+
+    monkeypatch.setattr(payroll_runs, "calculate_withholdings", calculator_spy)
+    period_start = effective_from - timedelta(days=1)
+    period_end = effective_from + timedelta(days=3)
+    response = _run(
+        client,
+        employee["id"],
+        period_start,
+        period_start=period_start,
+        period_end=period_end,
+    )
+    observed = {
+        "status_code": response.status_code,
+        "response": response.json(),
+        "calculator_calls": len(calculator_calls),
+        "run_count": db_session.query(PayRun).count(),
+        "stub_count": db_session.query(PayStub).count(),
+    }
+
+    assert observed["status_code"] == 422, observed
+    assert "cross" in observed["response"]["detail"].lower(), observed
+    assert calculator_calls == []
+    assert observed["run_count"] == 0
+    assert observed["stub_count"] == 0
+
+
+def test_wholly_pre_canadian_period_keeps_legacy_us_creation(
+    client, db_session
+):
+    from app.models.payroll import PayRun, PayStub
+
+    employee = _employee(client)
+    effective_from = date(2026, 10, 25)
+    configured = _jurisdiction(client, "AB", effective_from)
+    assert configured.status_code == 201, configured.text
+    period_start = effective_from - timedelta(days=5)
+    period_end = effective_from - timedelta(days=2)
+    pay_date = effective_from - timedelta(days=1)
+
+    response = _run(
+        client,
+        employee["id"],
+        pay_date,
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["jurisdiction_snapshot"] is None
+    assert response.json()["stubs"][0]["federal_tax"] > 0
+    assert db_session.query(PayRun).count() == 1
+    assert db_session.query(PayStub).count() == 1
+
+
+@pytest.mark.parametrize("start_offset", [0, 1])
+def test_period_starting_on_or_after_canadian_activation_is_blocked(
+    client, db_session, start_offset
+):
+    from app.models.payroll import PayRun, PayStub
+
+    employee = _employee(client)
+    effective_from = date(2026, 10, 25)
+    configured = _jurisdiction(client, "AB", effective_from)
+    assert configured.status_code == 201, configured.text
+    period_start = effective_from + timedelta(days=start_offset)
+    period_end = period_start + timedelta(days=3)
+
+    response = _run(
+        client,
+        employee["id"],
+        period_start,
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    assert response.status_code == 422, response.text
+    assert "Canadian payroll calculation support is not enabled yet" in response.json()[
+        "detail"
+    ]
+    assert db_session.query(PayRun).count() == 0
+    assert db_session.query(PayStub).count() == 0
 
 
 def test_ambiguous_jurisdiction_history_fails_closed_without_a_run(
@@ -435,6 +543,52 @@ def test_processing_with_ambiguous_jurisdiction_history_fails_closed(
     assert db_session.get(PayRun, run_id).status is PayRunStatus.DRAFT
     assert db_session.get(PayRun, run_id).transaction_id is None
     assert db_session.query(Transaction).count() == 0
+
+
+def test_processing_period_crossing_canadian_activation_fails_before_posting(
+    client, db_session, seed_accounts
+):
+    from app.models.job_costing import JobCost
+    from app.models.payroll import PayRun, PayRunStatus
+    from app.models.transactions import Transaction, TransactionLine
+
+    employee = _employee(client)
+    effective_from = date(2026, 10, 25)
+    period_start = effective_from - timedelta(days=1)
+    period_end = effective_from + timedelta(days=3)
+    created = _run(
+        client,
+        employee["id"],
+        period_start,
+        period_start=period_start,
+        period_end=period_end,
+    )
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+
+    configured = _jurisdiction(client, "AB", effective_from)
+    assert configured.status_code == 201, configured.text
+    response = _process(client, run_id)
+
+    stored = db_session.get(PayRun, run_id)
+    observed = {
+        "status_code": response.status_code,
+        "response": response.json(),
+        "status": stored.status.value,
+        "transaction_id": stored.transaction_id,
+        "burden_job_cost_id": stored.burden_job_cost_id,
+        "transaction_count": db_session.query(Transaction).count(),
+        "transaction_line_count": db_session.query(TransactionLine).count(),
+        "job_cost_count": db_session.query(JobCost).count(),
+    }
+    assert observed["status_code"] == 422, observed
+    assert "cross" in observed["response"]["detail"].lower(), observed
+    assert stored.status is PayRunStatus.DRAFT
+    assert stored.transaction_id is None
+    assert stored.burden_job_cost_id is None
+    assert observed["transaction_count"] == 0
+    assert observed["transaction_line_count"] == 0
+    assert observed["job_cost_count"] == 0
 
 
 def test_processing_without_jurisdiction_history_keeps_legacy_us_behavior(

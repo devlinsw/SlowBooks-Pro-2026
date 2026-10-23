@@ -310,17 +310,22 @@ def test_guarded_write_and_initial_jurisdiction_activation_serialize(
 
         monkeypatch.setattr(portal_routes, "_save_profile", track_profile_save_commit)
 
-    original_resolve = route_module.resolve_company_payroll_jurisdiction
+    if kind == "pay-run":
+        resolver_name = "resolve_company_payroll_jurisdiction_for_period"
+        original_resolve = getattr(route_module, resolver_name)
+    else:
+        resolver_name = "resolve_company_payroll_jurisdiction"
+        original_resolve = getattr(route_module, resolver_name)
 
-    def pause_after_real_resolution(db, as_of):
-        result = original_resolve(db, as_of)
+    def pause_after_real_resolution(db, *args, **kwargs):
+        result = original_resolve(db, *args, **kwargs)
         if db.info.get("race_role") == "guarded":
             profile_read.set()
             if not release_profile.wait(timeout=15):
                 raise TimeoutError("guarded request was not released")
         return result
 
-    monkeypatch.setattr(route_module, "resolve_company_payroll_jurisdiction", pause_after_real_resolution)
+    monkeypatch.setattr(route_module, resolver_name, pause_after_real_resolution)
 
     gross_up_spies: dict[str, Mock] = {}
     if kind == "gross-up":

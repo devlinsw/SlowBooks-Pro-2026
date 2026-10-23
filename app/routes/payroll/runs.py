@@ -18,7 +18,6 @@ from app.models.payroll import (
     Employee,
     periods_per_year,
 )
-from app.models.payroll_jurisdiction import PayrollJurisdiction
 from app.models.time_entries import TimeEntry, TimeEntryStatus
 from app.models.deductions import GarnishmentOrder
 from app.models.accounts import Account
@@ -35,9 +34,12 @@ from app.services.garnishment import (
 from app.services.gross_up import gross_up
 from app.services.state_tax.reciprocity import withholding_state
 from app.services.payroll_jurisdiction_service import (
+    CompanyCountryMode,
     PayrollJurisdictionAmbiguous,
+    PayrollJurisdictionPeriodBoundary,
     lock_company_payroll_jurisdiction,
     resolve_company_payroll_jurisdiction,
+    resolve_company_payroll_jurisdiction_for_period,
 )
 from app.services import benefits_engine
 
@@ -51,7 +53,7 @@ def _with_employee_names(run: PayRun) -> PayRunResponse:
 
 
 def _payroll_jurisdiction_snapshot(
-    record: PayrollJurisdiction | None, pay_date: date
+    record: CompanyCountryMode | None, pay_date: date
 ) -> dict[str, Any] | None:
     """Copy jurisdiction source values onto the pay run, never by reference."""
     if record is None:
@@ -210,23 +212,13 @@ def create_pay_run(data: PayRunCreate, db: Session = Depends(get_db)):
             detail="Payroll jurisdiction status is unavailable; pay-run creation is blocked.",
         ) from exc
     try:
-        jurisdiction = resolve_company_payroll_jurisdiction(db, data.pay_date)
+        jurisdiction = resolve_company_payroll_jurisdiction_for_period(
+            db, data.period_start, data.period_end, lock=True
+        )
+    except PayrollJurisdictionPeriodBoundary as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if jurisdiction is None:
-        first_effective_from = (
-            db.query(PayrollJurisdiction.effective_from)
-            .order_by(
-                PayrollJurisdiction.effective_from.asc(), PayrollJurisdiction.id.asc()
-            )
-            .scalar()
-        )
-        # Until the first scheduled range starts, legacy-US payroll remains active.
-        if first_effective_from is not None and data.pay_date >= first_effective_from:
-            raise HTTPException(
-                status_code=422,
-                detail="No configured payroll jurisdiction applies on the pay date.",
-            )
     jurisdiction_snapshot = _payroll_jurisdiction_snapshot(
         jurisdiction, data.pay_date
     )
@@ -606,7 +598,11 @@ def process_pay_run(run_id: int, db: Session = Depends(get_db)):
     if not run:
         raise HTTPException(status_code=404, detail="Pay run not found")
     try:
-        jurisdiction = resolve_company_payroll_jurisdiction(db, run.pay_date)
+        jurisdiction = resolve_company_payroll_jurisdiction_for_period(
+            db, run.period_start, run.period_end, lock=True
+        )
+    except PayrollJurisdictionPeriodBoundary as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if jurisdiction is not None or run.jurisdiction_snapshot is not None:

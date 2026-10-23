@@ -82,6 +82,10 @@ class PayrollJurisdictionAmbiguous(PayrollJurisdictionConflict):
     """Stored effective ranges overlap, have gaps, or are not fully resolvable."""
 
 
+class PayrollJurisdictionPeriodBoundary(PayrollJurisdictionConflict):
+    """The payroll period spans the U.S.-Canadian country-mode boundary."""
+
+
 class EmployeePayrollJurisdictionConflict(PayrollJurisdictionConflict):
     """An employee province change conflicts with history or processed payroll."""
 
@@ -157,6 +161,65 @@ def resolve_company_payroll_jurisdiction(db, as_of: date, *, lock=False):
     if not matches:
         return None
     record = matches[0]
+    return CompanyCountryMode(
+        id=record.id,
+        country_code=record.country_code,
+        province_code=None,
+        regulatory_scope=record.regulatory_scope,
+        effective_from=record.effective_from,
+        effective_to=record.effective_to,
+    )
+
+
+def resolve_company_payroll_jurisdiction_for_period(
+    db, period_start: date, period_end: date, *, lock=False
+):
+    """Resolve Canadian mode against the complete inclusive payroll period."""
+    if (
+        not isinstance(period_start, date)
+        or not isinstance(period_end, date)
+        or period_start > period_end
+    ):
+        raise PayrollJurisdictionAmbiguous(
+            "The payroll period has an invalid effective date range."
+        )
+
+    history = _ordered_history(db, lock=lock)
+    _validate_history(history)
+    if not history:
+        return None
+
+    first_effective_from = history[0].effective_from
+    if period_start < first_effective_from <= period_end:
+        raise PayrollJurisdictionPeriodBoundary(
+            "Payroll periods that cross the U.S.-Canadian country-mode boundary "
+            "are not supported."
+        )
+
+    overlaps = [
+        record
+        for record in history
+        if record.effective_from <= period_end
+        and (record.effective_to is None or period_start <= record.effective_to)
+    ]
+    if not overlaps:
+        return None
+
+    record = next(
+        (
+            item
+            for item in history
+            if item.effective_from <= period_start
+            and (item.effective_to is None or period_start <= item.effective_to)
+        ),
+        None,
+    )
+    if record is None:
+        # A valid history cannot leave a gap; reaching this branch means stored
+        # values were malformed or the period overlaps only part of a range.
+        raise PayrollJurisdictionAmbiguous(
+            "The payroll period does not resolve to one company country mode."
+        )
     return CompanyCountryMode(
         id=record.id,
         country_code=record.country_code,
