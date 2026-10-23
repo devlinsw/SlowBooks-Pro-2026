@@ -80,13 +80,13 @@ def test_no_history_gross_up_keeps_legacy_date_free_ytd_behavior(client, monkeyp
 
     assert response.status_code == 200, response.text
     assert ytd_spy.call_args.args[1:] == (employee["id"], date.today().year)
-    assert ytd_spy.call_args.kwargs == {}
+    assert ytd_spy.call_args.kwargs == {"stubs": []}
     supplemental_ytd_spy.assert_called_once()
     assert supplemental_ytd_spy.call_args.args[1:] == (
         employee["id"],
         date.today().year,
     )
-    assert supplemental_ytd_spy.call_args.kwargs == {}
+    assert supplemental_ytd_spy.call_args.kwargs == {"stubs": []}
 
 
 def test_future_only_jurisdiction_keeps_pre_effective_us_gross_up_behavior(client):

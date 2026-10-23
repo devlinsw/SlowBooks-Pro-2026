@@ -35,6 +35,7 @@ from app.routes.attachments import (
     ALLOWED_MIME_TYPES,
 )
 from app.routes.payroll import employee_ytd
+from app.routes.payroll.ytd import _validated_ytd_stubs
 from app.schemas.hr import EmployeeDocumentResponse
 from app.schemas.payroll import (
     EmployeeCreate,
@@ -479,7 +480,8 @@ def get_employee_ytd(
     emp = db.query(Employee).filter(Employee.id == emp_id).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
-    totals = employee_ytd(db, emp_id, year)
+    stubs = _validated_ytd_stubs(db, emp_id, year)
+    totals = employee_ytd(db, emp_id, year, stubs=stubs)
     return YTDResponse(
         employee_id=emp_id,
         year=year,

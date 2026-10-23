@@ -9,7 +9,12 @@ from sqlalchemy.orm import Session, joinedload
 from app.database import get_db
 from app.routes._helpers import clamp_pagination
 from app.routes.payroll._router import router
-from app.routes.payroll.ytd import _ytd_supplemental, employee_ytd
+from app.routes.payroll.ytd import (
+    _validate_us_ytd_contributor,
+    _validated_ytd_stubs,
+    _ytd_supplemental,
+    employee_ytd,
+)
 from app.models.payroll import (
     PayRun,
     PayStub,
@@ -183,18 +188,35 @@ def _garnishment_specs(db: Session, employee_id: int) -> list:
 
 def _last_regular_gross(db: Session, employee_id: int, before: date) -> Decimal:
     """Most recent regular-run gross pay — the base for aggregate supplemental."""
-    stub = (
-        db.query(PayStub)
-        .join(PayRun, PayStub.pay_run_id == PayRun.id)
-        .filter(
-            PayStub.employee_id == employee_id,
-            PayRun.run_type == PayRunType.REGULAR,
-            PayRun.status != PayRunStatus.VOID,
-            PayRun.pay_date < before,
+    try:
+        lock_company_payroll_jurisdiction(db)
+        stub = (
+            db.query(PayStub)
+            .join(PayRun, PayStub.pay_run_id == PayRun.id)
+            .filter(
+                PayStub.employee_id == employee_id,
+                PayRun.run_type == PayRunType.REGULAR,
+                PayRun.status != PayRunStatus.VOID,
+                PayRun.pay_date < before,
+            )
+            .order_by(PayRun.pay_date.desc())
+            .first()
         )
-        .order_by(PayRun.pay_date.desc())
-        .first()
-    )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll history is unavailable; supplemental withholding is blocked.",
+        ) from exc
+    if stub:
+        try:
+            _validate_us_ytd_contributor(db, stub.pay_run)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Payroll history is unavailable; supplemental withholding is blocked.",
+            ) from exc
     return Decimal(str(stub.gross_pay)) if stub else Decimal("0")
 
 
@@ -311,6 +333,24 @@ def create_pay_run(data: PayRunCreate, db: Session = Depends(get_db)):
             ),
         )
 
+    year = data.pay_date.year
+    ytd_stubs_by_employee = {}
+    regular_wages_by_employee = {}
+    for stub_input in data.stubs:
+        employee_id = stub_input.employee_id
+        if employee_id not in ytd_stubs_by_employee:
+            ytd_stubs_by_employee[employee_id] = _validated_ytd_stubs(
+                db, employee_id, year, before=data.pay_date
+            )
+        if (
+            stub_input.supplemental
+            and stub_input.supplemental_method == "aggregate"
+            and employee_id not in regular_wages_by_employee
+        ):
+            regular_wages_by_employee[employee_id] = _last_regular_gross(
+                db, employee_id, data.pay_date
+            )
+
     run = PayRun(
         period_start=data.period_start,
         period_end=data.period_end,
@@ -321,7 +361,6 @@ def create_pay_run(data: PayRunCreate, db: Session = Depends(get_db)):
     db.add(run)
     db.flush()
 
-    year = data.pay_date.year
     total_gross = total_taxes = total_net = total_employer = Decimal("0")
     total_employer_benefits = Decimal("0")
     period = f"{data.period_start} to {data.period_end}"
@@ -442,11 +481,16 @@ def create_pay_run(data: PayRunCreate, db: Session = Depends(get_db)):
 
         regular_wages = Decimal("0")
         if stub_input.supplemental and stub_input.supplemental_method == "aggregate":
-            regular_wages = _last_regular_gross(db, emp.id, data.pay_date)
+            regular_wages = regular_wages_by_employee.get(emp.id, Decimal("0"))
 
-        ytd = employee_ytd(db, emp.id, year, before=data.pay_date)
+        ytd_stubs = ytd_stubs_by_employee[emp.id]
+        ytd = employee_ytd(
+            db, emp.id, year, before=data.pay_date, stubs=ytd_stubs
+        )
         ytd_suppl = (
-            _ytd_supplemental(db, emp.id, year, before=data.pay_date)
+            _ytd_supplemental(
+                db, emp.id, year, before=data.pay_date, stubs=ytd_stubs
+            )
             if stub_input.supplemental
             else Decimal("0")
         )
@@ -922,9 +966,12 @@ def gross_up_paycheck(data: GrossUpRequest, db: Session = Depends(get_db)):
 
     year = pay_date.year
     ytd_options = {"before": pay_date} if data.pay_date is not None else {}
-    ytd = employee_ytd(db, emp.id, year, **ytd_options)
+    ytd_stubs = _validated_ytd_stubs(
+        db, emp.id, year, before=ytd_options.get("before")
+    )
+    ytd = employee_ytd(db, emp.id, year, stubs=ytd_stubs, **ytd_options)
     ytd_suppl = (
-        _ytd_supplemental(db, emp.id, year, **ytd_options)
+        _ytd_supplemental(db, emp.id, year, stubs=ytd_stubs, **ytd_options)
         if data.supplemental
         else Decimal("0")
     )
