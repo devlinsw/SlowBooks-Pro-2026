@@ -5,14 +5,38 @@
 const EmployeesPage = {
     _states: [],
     _stateHint(code) { const st = EmployeesPage._states.find(x => x.code === (code || '').toUpperCase()); return st ? `${st.name}: ${st.summary}${st.uses_local_rate ? ' · needs a local rate' : ''}${st.uses_rate_election ? ' · elected rate' : ''}` : 'Type a 2-letter code; every state + DC is supported'; },
+    _employeeSetupState(jurisdiction) {
+        if (!jurisdiction || !Object.prototype.hasOwnProperty.call(jurisdiction, 'country_code') || !Object.prototype.hasOwnProperty.call(jurisdiction, 'province_code')) return 'unavailable';
+        if (jurisdiction.country_code === 'CA') return 'canada';
+        if (jurisdiction.country_code === null && jurisdiction.province_code === null) return 'us';
+        return 'unavailable';
+    },
+    async _getEmployeeSetupState() {
+        try {
+            return EmployeesPage._employeeSetupState(await API.get('/settings/payroll-jurisdiction'));
+        } catch (_) {
+            return 'unavailable';
+        }
+    },
     async render() {
+        const setupState = await EmployeesPage._getEmployeeSetupState();
+        if (setupState === 'unavailable') {
+            return `
+                <div class="page-header"><h2>Employees</h2></div>
+                <div role="alert" aria-live="assertive" style="padding:12px;border-left:4px solid #9a3412;background:#fff7ed;color:#7c2d12;">
+                    Payroll jurisdiction status could not be verified. Employee setup and US tax forms are disabled.
+                    Do not enter US W-4, state, or Social Security data. Reload after the status is resolved.
+                </div>`;
+        }
+        const isCanadian = setupState === 'canada';
         const emps = await API.get(`/employees${ActiveLists.query('employees')}`);
         ActiveLists.remember('employees', emps);
         let html = `
             <div class="page-header">
                 <h2>Employees</h2>
-                <button class="btn btn-primary" onclick="EmployeesPage.showForm()">+ Add Employee</button>
+                ${isCanadian ? '' : '<button class="btn btn-primary" onclick="EmployeesPage.showForm()">+ Add Employee</button>'}
             </div>
+            ${isCanadian ? '<div role="alert" aria-live="assertive" style="padding:12px;border-left:4px solid #9a3412;background:#fff7ed;color:#7c2d12;margin:12px 0;">Canadian employee setup is unavailable. Do not enter US W-4, state, or Social Security data. Canadian tax setup is not provided here.</div>' : ''}
             <div class="toolbar">${ActiveLists.pickerHtml('employees')}</div>`;
 
         if (emps.length === 0 && ActiveLists.emptyText('employees')) {
@@ -21,16 +45,16 @@ const EmployeesPage = {
             html += '<div class="empty-state"><p>No employees added yet</p></div>';
         } else {
             html += `<div class="table-container"><table>
-                <thead><tr><th scope="col">Name</th><th scope="col">Pay Type</th><th scope="col" class="amount">Rate</th><th scope="col">Status</th><th scope="col">Filing</th><th scope="col">Actions</th></tr></thead><tbody>`;
+                <thead><tr><th scope="col">Name</th><th scope="col">Pay Type</th><th scope="col" class="amount">Rate</th><th scope="col">Status</th>${isCanadian ? '' : '<th scope="col">Filing</th>'}<th scope="col">Actions</th></tr></thead><tbody>`;
             for (const e of emps) {
                 html += `<tr>
                     <td><strong>${escapeHtml(e.first_name)} ${escapeHtml(e.last_name)}</strong></td>
                     <td>${e.pay_type}</td>
                     <td class="amount">${formatCurrency(e.pay_rate)}${e.pay_type==='hourly'?'/hr':'/yr'}</td>
                     <td>${e.is_active ? '<span class="badge badge-paid">Active</span>' : '<span class="badge badge-draft">Inactive</span>'}</td>
-                    <td>${e.filing_status}</td>
+                    ${isCanadian ? '' : `<td>${e.filing_status}</td>`}
                     <td class="actions">
-                        <button class="btn btn-sm btn-secondary" onclick="EmployeesPage.showForm(${e.id})">Edit</button>
+                        ${isCanadian ? '' : `<button class="btn btn-sm btn-secondary" onclick="EmployeesPage.showForm(${e.id})">Edit</button>`}
                         <button class="btn btn-sm btn-secondary" onclick="EmployeesPage.viewDetails(${e.id})">Details</button>
                         ${ActiveLists.buttonHtml('employees', e)}
                     </td>
@@ -42,6 +66,13 @@ const EmployeesPage = {
     },
 
     async showForm(id = null) {
+        const setupState = await EmployeesPage._getEmployeeSetupState();
+        if (setupState !== 'us') {
+            toast(setupState === 'canada'
+                ? 'Canadian employee setup is unavailable. Do not enter US W-4, state, or Social Security data.'
+                : 'Payroll jurisdiction status could not be verified. US employee forms are disabled.', 'error');
+            return;
+        }
         let emp = {
             first_name: '', last_name: '', pay_type: 'hourly', pay_rate: 0,
             filing_status: 'single', hire_date: todayISO(),
@@ -169,6 +200,13 @@ const EmployeesPage = {
 
     async save(e, id) {
         e.preventDefault();
+        const setupState = await EmployeesPage._getEmployeeSetupState();
+        if (setupState !== 'us') {
+            toast(setupState === 'canada'
+                ? 'Canadian employee setup is unavailable. Do not enter US W-4, state, or Social Security data.'
+                : 'Payroll jurisdiction status could not be verified. US employee forms are disabled.', 'error');
+            return;
+        }
         const data = Object.fromEntries(new FormData(e.target).entries());
         data.pay_rate = parseFloat(data.pay_rate) || 0;
         data.cost_rate = data.cost_rate === '' || data.cost_rate === undefined ? null : parseFloat(data.cost_rate);

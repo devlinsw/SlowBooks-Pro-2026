@@ -70,6 +70,116 @@ const BenefitsPage = {
 
     async _codesTab() {
         const codes = await API.get('/benefits/codes?include_inactive=true');
+        let seedAction = '';
+        let seedNotice = '';
+        try {
+            const jurisdiction = await API.get('/settings/payroll-jurisdiction');
+            const requiredFields = [
+                'country_code', 'province_code', 'effective_from', 'effective_to',
+                'regulatory_scope', 'server_today', 'minimum_effective_from', 'history',
+            ];
+            const supportedProvinces = new Set(['AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'ON', 'PE', 'SK']);
+            const isIsoDate = value => {
+                if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith('0000')) return false;
+                const date = new Date(`${value}T00:00:00.000Z`);
+                return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+            };
+            const hasValidRange = (effectiveFrom, effectiveTo) =>
+                isIsoDate(effectiveFrom) &&
+                (effectiveTo === null || (isIsoDate(effectiveTo) && effectiveTo >= effectiveFrom));
+            const isValidHistoryEntry = entry =>
+                entry &&
+                typeof entry === 'object' &&
+                !Array.isArray(entry) &&
+                ['country_code', 'province_code', 'regulatory_scope', 'effective_from', 'effective_to']
+                    .every(field => Object.prototype.hasOwnProperty.call(entry, field)) &&
+                entry.country_code === 'CA' &&
+                supportedProvinces.has(entry.province_code) &&
+                entry.regulatory_scope === 'provincially_regulated' &&
+                hasValidRange(entry.effective_from, entry.effective_to);
+            const isValidHistory = history => {
+                if (!Array.isArray(history) || !history.every(isValidHistoryEntry)) return false;
+                if (history.length === 0) return true;
+                if (history[history.length - 1].effective_to !== null) return false;
+                return history.every((entry, index) => {
+                    if (index === 0) return true;
+                    const previous = history[index - 1];
+                    return previous.effective_to !== null &&
+                        Date.parse(`${previous.effective_to}T00:00:00.000Z`) + 86400000 ===
+                            Date.parse(`${entry.effective_from}T00:00:00.000Z`);
+                });
+            };
+            const nextIsoDate = value => {
+                const date = new Date(`${value}T00:00:00.000Z`);
+                date.setUTCDate(date.getUTCDate() + 1);
+                return date.getUTCFullYear() > 9999 ? null : date.toISOString().slice(0, 10);
+            };
+            const hasConsistentMinimumEffectiveFrom = () => {
+                if (jurisdiction.history.length === 0) {
+                    return jurisdiction.minimum_effective_from === jurisdiction.server_today;
+                }
+                const nextServerDate = nextIsoDate(jurisdiction.server_today);
+                const nextHistoryDate = nextIsoDate(
+                    jurisdiction.history[jurisdiction.history.length - 1].effective_from
+                );
+                const expectedMinimum = nextServerDate && nextHistoryDate
+                    ? (nextServerDate > nextHistoryDate ? nextServerDate : nextHistoryDate)
+                    : null;
+                return jurisdiction.minimum_effective_from === expectedMinimum;
+            };
+            const isObjectResponse = Boolean(
+                jurisdiction && typeof jurisdiction === 'object' && !Array.isArray(jurisdiction)
+            );
+            const hasRequiredFields = isObjectResponse && requiredFields.every(
+                field => Object.prototype.hasOwnProperty.call(jurisdiction, field)
+            );
+            const noActiveJurisdiction = hasRequiredFields &&
+                jurisdiction.country_code === null &&
+                jurisdiction.province_code === null &&
+                jurisdiction.effective_from === null &&
+                jurisdiction.effective_to === null;
+            const activeJurisdiction = hasRequiredFields &&
+                typeof jurisdiction.country_code === 'string' &&
+                jurisdiction.country_code.trim() !== '' &&
+                supportedProvinces.has(jurisdiction.province_code) &&
+                hasValidRange(jurisdiction.effective_from, jurisdiction.effective_to);
+            const hasValidResponse = hasRequiredFields &&
+                jurisdiction.regulatory_scope === 'provincially_regulated' &&
+                isIsoDate(jurisdiction.server_today) &&
+                (jurisdiction.minimum_effective_from === null || isIsoDate(jurisdiction.minimum_effective_from)) &&
+                isValidHistory(jurisdiction.history) &&
+                hasConsistentMinimumEffectiveFrom() &&
+                (noActiveJurisdiction || activeJurisdiction);
+            const serverToday = jurisdiction.server_today;
+            const activeRecordIsInHistory = hasValidResponse && jurisdiction.country_code === 'CA' &&
+                jurisdiction.history.some(entry =>
+                    entry.country_code === jurisdiction.country_code &&
+                    entry.province_code === jurisdiction.province_code &&
+                    entry.effective_from === jurisdiction.effective_from &&
+                    entry.effective_to === jurisdiction.effective_to &&
+                    entry.effective_from <= serverToday &&
+                    (entry.effective_to === null || serverToday <= entry.effective_to)
+                );
+            const hasFutureOnlyHistory = hasValidResponse && noActiveJurisdiction && jurisdiction.history.every(
+                entry => entry.effective_from > serverToday
+            );
+            const hasSupportedJurisdiction = hasValidResponse &&
+                (jurisdiction.country_code === 'CA'
+                    ? activeRecordIsInHistory
+                    : noActiveJurisdiction ? hasFutureOnlyHistory : true);
+
+            if (!hasSupportedJurisdiction) {
+                seedNotice = '<p role="alert" aria-live="assertive" style="margin:0 0 12px;">Standard benefit presets are unavailable because the payroll jurisdiction response is unsupported.</p>';
+            } else if (jurisdiction.country_code === 'CA') {
+                seedNotice = '<p role="status" aria-live="polite" style="margin:0 0 12px;">Standard benefit presets are not Canadian-reviewed and are not available for Canadian companies.</p>';
+            } else if (jurisdiction.country_code === null) {
+                seedAction = '<button class="btn btn-secondary" onclick="BenefitsPage.seedStandard()">Seed standard codes</button>';
+            } else {
+                seedNotice = '<p role="alert" aria-live="assertive" style="margin:0 0 12px;">Standard benefit presets are unavailable for this unsupported payroll jurisdiction.</p>';
+            }
+        } catch (err) {
+            seedNotice = '<p role="alert" aria-live="assertive" style="margin:0 0 12px;">Payroll jurisdiction could not be verified. Standard benefit presets are unavailable until it can be checked.</p>';
+        }
         const rows = codes.map(c => `<tr ${c.is_active ? '' : 'class="row--dim"'}>
             <td class="amount">${c.sequence}</td>
             <td><strong>${escapeHtml(c.code)}</strong><br><span style="font-size:12px;">${escapeHtml(c.name)}</span></td>
@@ -85,9 +195,10 @@ const BenefitsPage = {
             </td>
         </tr>`).join('');
         return `
+            ${seedNotice}
             <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
                 <button class="btn btn-primary" onclick="BenefitsPage.showCodeForm()">+ Add Code</button>
-                <button class="btn btn-secondary" onclick="BenefitsPage.seedStandard()">Seed standard codes</button>
+                ${seedAction}
                 <button class="btn btn-secondary" onclick="BenefitsPage.setupAccounts()">Create default accounts</button>
             </div>
             <div class="table-container"><table>

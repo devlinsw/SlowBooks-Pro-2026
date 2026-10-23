@@ -4,6 +4,11 @@ Status: PARKED 2026-09-03. Trent asked for the full set (sales tax, payroll,
 filings, conversion), heard the sizing, and parked it so the v2.8 stage stays
 shippable. Nothing here is committed product behavior.
 
+**Payroll supersession:** The payroll portion of this parked note is superseded
+by [the current owner-approved Canadian payroll scope and source matrix](canadian-payroll.md).
+This file remains PARKED for its unrelated sales-tax and conversion material;
+that link does not unpark those topics.
+
 ## The requirement
 
 Seamless: a Canadian company must feel exactly like a US one does today. One

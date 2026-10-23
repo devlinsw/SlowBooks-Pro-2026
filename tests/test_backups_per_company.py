@@ -36,7 +36,11 @@ def _make_books(path, company, value, revision=None):
         conn.execute("INSERT INTO t VALUES (?)", (value,))
         if revision:
             conn.execute("CREATE TABLE alembic_version (version_num TEXT)")
-            conn.execute("INSERT INTO alembic_version VALUES (?)", (revision,))
+            revisions = revision if isinstance(revision, tuple) else (revision,)
+            conn.executemany(
+                "INSERT INTO alembic_version VALUES (?)",
+                ((item,) for item in revisions),
+            )
         conn.commit()
 
 
