@@ -500,11 +500,14 @@ def portal_paystubs(request: Request, db: Session = Depends(get_db)):
 @router.get("/portal/profile")
 @limiter.limit("30/minute")
 def portal_profile(request: Request, saved: int = 0, db: Session = Depends(get_db)):
+    _lock_us_employee_profile(db)
     emp = _employee_from_cookie(request, db)
+    _lock_us_employee_profile(db)
     try:
         profile_jurisdiction = _employee_profile_jurisdiction(db)
     except HTTPException:
         db.rollback()
+        _lock_us_employee_profile(db)
         profile_jurisdiction = "unavailable"
     return _render(
         "profile.html",

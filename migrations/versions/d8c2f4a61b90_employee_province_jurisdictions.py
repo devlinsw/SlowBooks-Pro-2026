@@ -18,6 +18,19 @@ depends_on: Union[str, Sequence[str], None] = None
 _PROVINCES = "'AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'ON', 'PE', 'SK'"
 
 
+def _restore_sqlite_company_open_range_index(bind) -> None:
+    """Restore the expression index dropped by SQLite batch table rebuilds."""
+    if bind.dialect.name != "sqlite":
+        return
+    op.create_index(
+        "uq_company_payroll_jurisdiction_open_range",
+        "company_payroll_jurisdictions",
+        [sa.text("(1)")],
+        unique=True,
+        sqlite_where=sa.text("effective_to IS NULL"),
+    )
+
+
 def upgrade() -> None:
     op.create_table(
         "employee_payroll_jurisdictions",
@@ -91,6 +104,7 @@ def upgrade() -> None:
                 existing_type=sa.String(length=2),
                 nullable=True,
             )
+        _restore_sqlite_company_open_range_index(bind)
     else:
         op.alter_column(
             "company_payroll_jurisdictions",
@@ -174,6 +188,7 @@ def downgrade() -> None:
                 existing_type=sa.String(length=2),
                 nullable=False,
             )
+        _restore_sqlite_company_open_range_index(bind)
     else:
         op.alter_column(
             "company_payroll_jurisdictions",
