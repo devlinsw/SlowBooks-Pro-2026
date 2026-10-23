@@ -99,7 +99,7 @@ def _paystub_ytd_contributors(db: Session, stub: PayStub, run: PayRun) -> list[P
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=503,
             detail="Pay-stub YTD contributors are unavailable; payroll output is blocked.",

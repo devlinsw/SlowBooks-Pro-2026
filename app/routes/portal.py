@@ -22,6 +22,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import Environment, FileSystemLoader
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import FORCE_HTTPS
@@ -523,6 +524,11 @@ def portal_paystubs(request: Request, db: Session = Depends(get_db)):
             )
         except (PayrollJurisdictionAmbiguous, PayrollJurisdictionPeriodBoundary):
             safe = False
+        except SQLAlchemyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Payroll jurisdiction history is unavailable; portal pay stubs are blocked.",
+            ) from exc
         if safe:
             stubs.append(stub)
     stubs.sort(key=lambda s: s.pay_run.pay_date, reverse=True)

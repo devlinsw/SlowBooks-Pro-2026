@@ -714,3 +714,173 @@ def test_target_period_history_read_failure_blocks_paystub_and_nacha_outputs(
     ytd_spy.assert_not_called()
     pdf_spy.assert_not_called()
     nacha_spy.assert_not_called()
+
+
+def test_paystub_ytd_does_not_mask_unexpected_runtime_error(
+    client, db_session, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.routes.payroll import exports, ytd as payroll_ytd
+    from app.services import paystub_pdf
+
+    employee = _employee(client)
+    pay_date = date.today()
+    run, stub = _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=pay_date - timedelta(days=14),
+        period_end=pay_date - timedelta(days=1),
+        pay_date=pay_date,
+    )
+    pdf_spy = Mock(return_value=b"unsafe PDF")
+    ytd_spy = Mock(wraps=exports.employee_ytd)
+
+    def fail_ytd_read(*_args, **_kwargs):
+        raise RuntimeError("unexpected programming failure")
+
+    monkeypatch.setattr(payroll_ytd, "_ytd_stubs", fail_ytd_read)
+    monkeypatch.setattr(paystub_pdf, "generate_paystub_pdf", pdf_spy)
+    monkeypatch.setattr(exports, "employee_ytd", ytd_spy)
+    request_client = TestClient(app, raise_server_exceptions=False)
+    request_client.cookies.update(client.cookies)
+
+    response = request_client.get(f"/api/payroll/{run.id}/paystub/{stub.id}")
+
+    assert response.status_code == 500, response.text
+    assert response.text == "Internal Server Error"
+    assert "unexpected programming failure" not in response.text
+    pdf_spy.assert_not_called()
+    ytd_spy.assert_not_called()
+
+
+def test_pay_run_list_history_read_error_aborts_without_partial_list(
+    client, db_session, monkeypatch
+):
+    from fastapi.testclient import TestClient
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from app.main import app
+    from app.routes.payroll import runs as payroll_runs
+
+    employee = _employee(client)
+    today = date.today()
+    _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=today - timedelta(days=14),
+        period_end=today - timedelta(days=8),
+        pay_date=today,
+    )
+    _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=today - timedelta(days=28),
+        period_end=today - timedelta(days=22),
+        pay_date=today - timedelta(days=14),
+    )
+    history_read_spy = Mock(
+        side_effect=[True, SQLAlchemyError("sensitive history database detail")]
+    )
+    monkeypatch.setattr(payroll_runs, "is_us_payroll_period", history_read_spy)
+    request_client = TestClient(app, raise_server_exceptions=False)
+    request_client.cookies.update(client.cookies)
+
+    response = request_client.get("/api/payroll?skip=0&limit=200")
+
+    expected_detail = "Payroll jurisdiction history is unavailable; pay-run reads are blocked."
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": expected_detail}
+    assert "sensitive history database detail" not in response.text
+    assert history_read_spy.call_count == 2
+
+
+def test_pay_run_detail_history_read_error_returns_generic_503(
+    client, db_session, monkeypatch
+):
+    from fastapi.testclient import TestClient
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from app.main import app
+    from app.routes.payroll import runs as payroll_runs
+
+    employee = _employee(client)
+    today = date.today()
+    run, _stub = _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=today - timedelta(days=14),
+        period_end=today - timedelta(days=1),
+        pay_date=today,
+    )
+    history_read_spy = Mock(
+        side_effect=SQLAlchemyError("sensitive history database detail")
+    )
+    monkeypatch.setattr(payroll_runs, "is_us_payroll_period", history_read_spy)
+    request_client = TestClient(app, raise_server_exceptions=False)
+    request_client.cookies.update(client.cookies)
+
+    response = request_client.get(f"/api/payroll/{run.id}")
+
+    expected_detail = "Payroll jurisdiction history is unavailable; pay-run reads are blocked."
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": expected_detail}
+    assert "sensitive history database detail" not in response.text
+    assert "stubs" not in response.json()
+    history_read_spy.assert_called_once()
+
+
+def test_portal_paystub_history_read_error_returns_generic_503_without_render(
+    client, db_session, monkeypatch
+):
+    from fastapi.testclient import TestClient
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from app.main import app
+    from app.models.portal_access import PortalAccess
+    from app.routes import portal
+
+    employee = _employee(client)
+    token_response = client.get(f"/api/employees/{employee['id']}/portal-token")
+    assert token_response.status_code == 200, token_response.text
+    today = date.today()
+    _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=today - timedelta(days=14),
+        period_end=today - timedelta(days=1),
+        pay_date=today,
+    )
+    request_client = TestClient(app, raise_server_exceptions=False)
+    request_client.cookies.set(
+        "slowbooks_portal", token_response.json()["portal_token"]
+    )
+    real_lock = portal.lock_company_payroll_jurisdiction
+    lock_spy = Mock(wraps=real_lock)
+    render_spy = Mock(wraps=portal._render)
+    history_read_spy = Mock(
+        side_effect=SQLAlchemyError("sensitive history database detail")
+    )
+    monkeypatch.setattr(portal, "lock_company_payroll_jurisdiction", lock_spy)
+    monkeypatch.setattr(portal, "_render", render_spy)
+    monkeypatch.setattr(portal, "is_us_payroll_period", history_read_spy)
+
+    response = request_client.get("/portal/paystubs")
+
+    expected_detail = "Payroll jurisdiction history is unavailable; portal pay stubs are blocked."
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": expected_detail}
+    assert "sensitive history database detail" not in response.text
+    assert lock_spy.call_count == 2
+    first_db = lock_spy.call_args_list[0].args[0]
+    second_db = lock_spy.call_args_list[1].args[0]
+    assert first_db is second_db
+    history_read_spy.assert_called_once()
+    render_spy.assert_not_called()
+    assert (
+        db_session.query(PortalAccess)
+        .filter(PortalAccess.employee_id == employee["id"])
+        .count()
+        == 1
+    )

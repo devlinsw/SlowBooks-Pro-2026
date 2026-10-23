@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import Depends, HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
@@ -95,6 +96,11 @@ def _require_us_run_output(db: Session, run: PayRun) -> None:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction history is unavailable; pay-run reads are blocked.",
+        ) from exc
     if not safe:
         raise HTTPException(
             status_code=422,
@@ -132,6 +138,11 @@ def list_pay_runs(skip: int = 0, limit: int = 200, db: Session = Depends(get_db)
                 )
             except (PayrollJurisdictionAmbiguous, PayrollJurisdictionPeriodBoundary):
                 safe = False
+            except SQLAlchemyError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Payroll jurisdiction history is unavailable; pay-run reads are blocked.",
+                ) from exc
             if not safe:
                 continue
             if safe_count >= skip:
