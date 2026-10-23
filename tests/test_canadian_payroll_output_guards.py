@@ -647,3 +647,70 @@ def test_portal_lock_failure_after_auth_commit_does_not_render_paystubs(
         .count()
         == 1
     )
+
+
+def test_target_period_history_read_failure_blocks_paystub_and_nacha_outputs(
+    client, db_session, monkeypatch
+):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from app.routes.payroll import exports
+    from app.services import nacha_export, paystub_pdf
+    from app.services.payroll_jurisdiction_service import is_us_payroll_period
+
+    employee = _employee(client)
+    pay_date = date.today()
+    period_start = pay_date - timedelta(days=14)
+    period_end = pay_date - timedelta(days=1)
+    run, stub = _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=period_start,
+        period_end=period_end,
+        pay_date=pay_date,
+    )
+    assert run.status is PayRunStatus.PROCESSED
+    assert is_us_payroll_period(db_session, period_start, period_end)
+
+    pdf_spy = Mock(return_value=b"unsafe PDF")
+    ytd_spy = Mock(wraps=exports.employee_ytd)
+    nacha_spy = Mock(return_value="unsafe NACHA")
+    jurisdiction_read_spy = Mock(
+        side_effect=SQLAlchemyError("sensitive history database detail")
+    )
+    monkeypatch.setattr(paystub_pdf, "generate_paystub_pdf", pdf_spy)
+    monkeypatch.setattr(exports, "employee_ytd", ytd_spy)
+    monkeypatch.setattr(nacha_export, "generate_nacha_file", nacha_spy)
+    monkeypatch.setattr(exports, "is_us_payroll_period", jurisdiction_read_spy)
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    request_client = TestClient(app, raise_server_exceptions=False)
+    request_client.cookies.update(client.cookies)
+
+    paystub_response = request_client.get(
+        f"/api/payroll/{run.id}/paystub/{stub.id}"
+    )
+    nacha_response = request_client.post(
+        f"/api/payroll/{run.id}/nacha",
+        json={
+            "immediate_destination": "123456789",
+            "immediate_origin": "ABC1234567",
+            "originating_dfi_id": "12345678",
+        },
+    )
+
+    expected_detail = (
+        "Payroll jurisdiction history is unavailable; payroll output is blocked."
+    )
+    assert paystub_response.status_code == 503, paystub_response.text
+    assert paystub_response.json()["detail"] == expected_detail
+    assert "sensitive history database detail" not in paystub_response.text
+    assert nacha_response.status_code == 503, nacha_response.text
+    assert nacha_response.json()["detail"] == expected_detail
+    assert "sensitive history database detail" not in nacha_response.text
+    assert jurisdiction_read_spy.call_count == 2
+    ytd_spy.assert_not_called()
+    pdf_spy.assert_not_called()
+    nacha_spy.assert_not_called()

@@ -5,6 +5,7 @@ from decimal import Decimal
 from fastapi import Depends, HTTPException
 from fastapi.responses import Response, PlainTextResponse
 from app.schemas.common import StrictModel
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -49,6 +50,11 @@ def _require_us_output_period(db: Session, run: PayRun) -> None:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction history is unavailable; payroll output is blocked.",
+        ) from exc
     if not safe:
         raise HTTPException(
             status_code=422,
