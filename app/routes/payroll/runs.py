@@ -589,6 +589,14 @@ def process_pay_run(run_id: int, db: Session = Depends(get_db)):
     """Process a pay run — posts the payroll journal entry."""
     from app.services.closing_date import check_closing_date
 
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; pay-run processing is blocked.",
+        ) from exc
+
     run = (
         db.query(PayRun)
         .options(joinedload(PayRun.stubs).joinedload(PayStub.benefits))
@@ -597,6 +605,15 @@ def process_pay_run(run_id: int, db: Session = Depends(get_db)):
     )
     if not run:
         raise HTTPException(status_code=404, detail="Pay run not found")
+    try:
+        jurisdiction = resolve_company_payroll_jurisdiction(db, run.pay_date)
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if jurisdiction is not None or run.jurisdiction_snapshot is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="Canadian payroll calculation support is not enabled yet.",
+        )
     if run.status == PayRunStatus.PROCESSED:
         raise HTTPException(status_code=400, detail="Pay run already processed")
     if run.status == PayRunStatus.VOID:

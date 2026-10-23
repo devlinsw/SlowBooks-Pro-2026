@@ -11,6 +11,7 @@ from datetime import date, timedelta
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from app.models.payroll import PayRun, PayRunStatus
 from app.models.payroll_jurisdiction import PayrollJurisdiction
 
 SUPPORTED_COUNTRY = "CA"
@@ -195,6 +196,18 @@ def add_company_payroll_jurisdiction(
             "effective_from must be 2026-01-01 or later."
         )
     lock_company_payroll_jurisdiction(db)
+    processed_run = (
+        db.query(PayRun.id)
+        .filter(
+            PayRun.status == PayRunStatus.PROCESSED,
+            PayRun.pay_date >= effective_from,
+        )
+        .first()
+    )
+    if processed_run is not None:
+        raise PayrollJurisdictionConflict(
+            "A processed pay run exists on or after the proposed effective date."
+        )
     history = _ordered_history(db, lock=True)
     _validate_history(history)
     today = date.today()

@@ -580,6 +580,7 @@ def test_post_commit_lock_does_not_break_jurisdiction_response_serialization(
 
     from app.database import get_db
     from app.main import app
+    from app.models.payroll import PayRun
     from app.models.payroll_jurisdiction import PayrollJurisdiction
 
     engine = create_engine(
@@ -587,6 +588,7 @@ def test_post_commit_lock_does_not_break_jurisdiction_response_serialization(
         connect_args={"timeout": 0},
     )
     PayrollJurisdiction.__table__.create(engine)
+    PayRun.__table__.create(engine)
 
     class JurisdictionSession(OrmSession):
         pass
@@ -834,6 +836,7 @@ def test_simultaneous_initial_posts_preserve_one_consistent_timeline(
 
     from app.database import get_db
     from app.main import app
+    from app.models.payroll import PayRun
     from app.models.payroll_jurisdiction import PayrollJurisdiction
     from app.routes import payroll_jurisdiction as jurisdiction_routes
     from app.services import payroll_jurisdiction_service
@@ -843,6 +846,7 @@ def test_simultaneous_initial_posts_preserve_one_consistent_timeline(
         connect_args={"check_same_thread": False, "timeout": 2},
     )
     PayrollJurisdiction.__table__.create(engine)
+    PayRun.__table__.create(engine)
     Session = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
     def file_backed_db():
@@ -969,3 +973,59 @@ def test_simultaneous_initial_posts_preserve_one_consistent_timeline(
         else:
             app.dependency_overrides[get_db] = previous_override
         engine.dispose()
+
+
+@pytest.mark.parametrize("processed_offset", [0, 4])
+def test_activation_conflicts_with_already_processed_runs_on_or_after_effective_date(
+    client, db_session, processed_offset
+):
+    from app.models.payroll import PayRun, PayRunStatus
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+
+    effective_from = date.today() + timedelta(days=20)
+    processed = PayRun(
+        period_start=effective_from + timedelta(days=processed_offset),
+        period_end=effective_from + timedelta(days=processed_offset),
+        pay_date=effective_from + timedelta(days=processed_offset),
+        status=PayRunStatus.PROCESSED,
+    )
+    db_session.add(processed)
+    db_session.commit()
+    processed_id = processed.id
+
+    response = client.post(
+        "/api/settings/payroll-jurisdiction",
+        json=_payload("AB", effective_from),
+    )
+
+    assert response.status_code == 409, response.text
+    assert db_session.query(PayrollJurisdiction).count() == 0
+    persisted = db_session.get(PayRun, processed_id)
+    assert persisted.status is PayRunStatus.PROCESSED
+    assert persisted.jurisdiction_snapshot is None
+
+
+def test_activation_after_strictly_pre_effective_processed_run_is_allowed(
+    client, db_session
+):
+    from app.models.payroll import PayRun, PayRunStatus
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+
+    effective_from = date.today() + timedelta(days=20)
+    processed = PayRun(
+        period_start=effective_from - timedelta(days=1),
+        period_end=effective_from - timedelta(days=1),
+        pay_date=effective_from - timedelta(days=1),
+        status=PayRunStatus.PROCESSED,
+    )
+    db_session.add(processed)
+    db_session.commit()
+
+    response = client.post(
+        "/api/settings/payroll-jurisdiction",
+        json=_payload("AB", effective_from),
+    )
+
+    assert response.status_code == 201, response.text
+    assert db_session.query(PayrollJurisdiction).one().effective_from == effective_from
+    assert db_session.query(PayRun).one().status is PayRunStatus.PROCESSED

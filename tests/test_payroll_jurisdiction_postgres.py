@@ -100,6 +100,13 @@ def test_read_committed_schedule_refreshes_history_after_row_lock_wait(monkeypat
             cursor.close()
 
         PayrollJurisdiction.__table__.create(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE pay_runs ("
+                    "id SERIAL PRIMARY KEY, status VARCHAR(20), pay_date DATE NOT NULL)"
+                )
+            )
         Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=True)
 
         @event.listens_for(engine, "before_cursor_execute")

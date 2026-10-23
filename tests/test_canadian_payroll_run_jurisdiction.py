@@ -4,6 +4,8 @@ import importlib.util
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
+
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, inspect, text
@@ -310,3 +312,226 @@ def test_pay_run_jurisdiction_snapshot_migration_is_nullable_and_reversible(tmp_
         ).scalar() is None
 
     engine.dispose()
+
+
+def _process(client, run_id):
+    return client.post(f"/api/payroll/{run_id}/process")
+
+
+def test_existing_us_draft_cannot_be_processed_after_canadian_activation(
+    client, db_session, seed_accounts
+):
+    from app.models.payroll import PayRun, PayRunStatus
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+    from app.models.job_costing import JobCost
+    from app.models.transactions import Transaction, TransactionLine
+
+    employee = _employee(client)
+    pay_date = date.today()
+    created = _run(client, employee["id"], pay_date)
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+    assert created.json()["jurisdiction_snapshot"] is None
+
+    configured = _jurisdiction(client, "AB", pay_date)
+    assert configured.status_code == 201, configured.text
+
+    response = _process(client, run_id)
+
+    assert response.status_code == 422, response.text
+    assert "Canadian payroll calculation support is not enabled yet" in response.json()["detail"]
+    stored = db_session.get(PayRun, run_id)
+    assert stored.status is PayRunStatus.DRAFT
+    assert stored.jurisdiction_snapshot is None
+    assert stored.transaction_id is None
+    assert stored.burden_job_cost_id is None
+    assert db_session.query(PayrollJurisdiction).one().effective_from == pay_date
+    assert db_session.query(Transaction).count() == 0
+    assert db_session.query(TransactionLine).count() == 0
+    assert db_session.query(JobCost).count() == 0
+
+
+def test_processing_run_with_canadian_snapshot_fails_closed(
+    client, db_session, seed_accounts
+):
+    from app.models.payroll import PayRun, PayRunStatus
+    from app.models.transactions import Transaction
+
+    employee = _employee(client)
+    created = _run(client, employee["id"], date.today())
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+    run = db_session.get(PayRun, run_id)
+    run.jurisdiction_snapshot = {
+        "country_code": "CA",
+        "province_code": "ON",
+        "regulatory_scope": "provincially_regulated",
+        "pay_date": date.today().isoformat(),
+    }
+    db_session.commit()
+
+    response = _process(client, run_id)
+
+    assert response.status_code == 422, response.text
+    assert db_session.get(PayRun, run_id).status is PayRunStatus.DRAFT
+    assert db_session.get(PayRun, run_id).transaction_id is None
+    assert db_session.query(Transaction).count() == 0
+
+
+@pytest.mark.parametrize("invalid_timeline", ["overlap", "gap"])
+def test_processing_with_ambiguous_jurisdiction_history_fails_closed(
+    client, db_session, seed_accounts, invalid_timeline
+):
+    from app.models.payroll import PayRun, PayRunStatus
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+    from app.models.transactions import Transaction
+
+    employee = _employee(client)
+    today = date.today()
+    created = _run(client, employee["id"], today)
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+    if invalid_timeline == "overlap":
+        history = [
+            PayrollJurisdiction(
+                country_code="CA",
+                province_code="AB",
+                regulatory_scope="provincially_regulated",
+                effective_from=today - timedelta(days=2),
+                effective_to=today + timedelta(days=2),
+            ),
+            PayrollJurisdiction(
+                country_code="CA",
+                province_code="ON",
+                regulatory_scope="provincially_regulated",
+                effective_from=today,
+                effective_to=None,
+            ),
+        ]
+    else:
+        history = [
+            PayrollJurisdiction(
+                country_code="CA",
+                province_code="AB",
+                regulatory_scope="provincially_regulated",
+                effective_from=today - timedelta(days=4),
+                effective_to=today - timedelta(days=2),
+            ),
+            PayrollJurisdiction(
+                country_code="CA",
+                province_code="ON",
+                regulatory_scope="provincially_regulated",
+                effective_from=today,
+                effective_to=None,
+            ),
+        ]
+    db_session.add_all(history)
+    db_session.commit()
+
+    response = _process(client, run_id)
+
+    assert response.status_code == 409, response.text
+    expected_detail = "uncovered" if invalid_timeline == "gap" else "ambiguous"
+    assert expected_detail in response.json()["detail"].lower()
+    assert db_session.get(PayRun, run_id).status is PayRunStatus.DRAFT
+    assert db_session.get(PayRun, run_id).transaction_id is None
+    assert db_session.query(Transaction).count() == 0
+
+
+def test_processing_without_jurisdiction_history_keeps_legacy_us_behavior(
+    client, db_session, seed_accounts
+):
+    from app.models.payroll import PayRun, PayRunStatus
+    from app.models.transactions import Transaction
+
+    employee = _employee(client)
+    created = _run(client, employee["id"], date.today())
+    assert created.status_code == 201, created.text
+
+    response = _process(client, created.json()["id"])
+
+    assert response.status_code == 200, response.text
+    stored = db_session.get(PayRun, created.json()["id"])
+    assert stored.status is PayRunStatus.PROCESSED
+    assert stored.jurisdiction_snapshot is None
+    assert stored.transaction_id is not None
+    assert db_session.query(Transaction).count() == 1
+
+
+def test_processing_before_future_canadian_start_keeps_legacy_us_behavior(
+    client, db_session, seed_accounts
+):
+    from app.models.payroll import PayRun, PayRunStatus
+    from app.models.transactions import Transaction
+
+    employee = _employee(client)
+    pay_date = date.today()
+    created = _run(client, employee["id"], pay_date)
+    assert created.status_code == 201, created.text
+    configured = _jurisdiction(client, "AB", pay_date + timedelta(days=5))
+    assert configured.status_code == 201, configured.text
+
+    response = _process(client, created.json()["id"])
+
+    assert response.status_code == 200, response.text
+    stored = db_session.get(PayRun, created.json()["id"])
+    assert stored.status is PayRunStatus.PROCESSED
+    assert stored.jurisdiction_snapshot is None
+    assert stored.transaction_id is not None
+    assert db_session.query(Transaction).count() == 1
+
+
+def test_pre_effective_historical_us_run_remains_processable(
+    client, db_session, seed_accounts
+):
+    from app.models.payroll import PayRun, PayRunStatus
+    from app.models.transactions import Transaction
+
+    employee = _employee(client)
+    pay_date = date.today() - timedelta(days=1)
+    created = _run(client, employee["id"], pay_date)
+    assert created.status_code == 201, created.text
+    configured = _jurisdiction(client, "AB", date.today())
+    assert configured.status_code == 201, configured.text
+
+    response = _process(client, created.json()["id"])
+
+    assert response.status_code == 200, response.text
+    stored = db_session.get(PayRun, created.json()["id"])
+    assert stored.status is PayRunStatus.PROCESSED
+    assert stored.jurisdiction_snapshot is None
+    assert stored.transaction_id is not None
+    assert db_session.query(Transaction).count() == 1
+
+
+def test_processing_lock_failure_returns_503_without_posting(
+    client, db_session, seed_accounts, monkeypatch
+):
+    from app.models.payroll import PayRun, PayRunStatus
+    from app.models.job_costing import JobCost
+    from app.models.transactions import Transaction, TransactionLine
+    from app.routes.payroll import runs
+
+    employee = _employee(client)
+    created = _run(client, employee["id"], date.today())
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+
+    def fail_lock(_db):
+        raise RuntimeError("simulated jurisdiction lock failure")
+
+    monkeypatch.setattr(runs, "lock_company_payroll_jurisdiction", fail_lock)
+
+    response = _process(client, run_id)
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == (
+        "Payroll jurisdiction status is unavailable; pay-run processing is blocked."
+    )
+    stored = db_session.get(PayRun, run_id)
+    assert stored.status is PayRunStatus.DRAFT
+    assert stored.transaction_id is None
+    assert stored.burden_job_cost_id is None
+    assert db_session.query(Transaction).count() == 0
+    assert db_session.query(TransactionLine).count() == 0
+    assert db_session.query(JobCost).count() == 0
