@@ -36,6 +36,10 @@ const TaxFormsPage = {
                 <h2>Tax Forms</h2>
             </div>
 
+            <div class="card" role="note" style="margin-bottom:16px;padding:12px 16px">
+                <p style="margin:0">U.S. payroll forms cover wholly U.S. periods only. Canadian periods that overlap the U.S. country boundary are blocked; Canadian forms are not implemented. Safe historical U.S. periods remain available.</p>
+            </div>
+
             <div class="card" style="margin-bottom:16px;padding:16px">
                 <h3 id="taxforms-h-w-2-w-3">W-2 / W-3</h3>
                 <div class="form-grid" role="group" aria-labelledby="taxforms-h-w-2-w-3">

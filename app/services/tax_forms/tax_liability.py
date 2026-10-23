@@ -31,7 +31,7 @@ def _filing_due_date(year: int, quarter: int) -> date:
     return date(due_year, due_month, calendar.monthrange(due_year, due_month)[1])
 
 
-def compute_tax_liability(db, year: int, quarter: int) -> dict:
+def compute_tax_liability(db, year: int, quarter: int, stubs=None) -> dict:
     """Return the payroll tax liability schedule for one calendar quarter."""
     if quarter not in (1, 2, 3, 4):
         raise ValueError("quarter must be 1-4")
@@ -39,16 +39,17 @@ def compute_tax_liability(db, year: int, quarter: int) -> dict:
     start, end = _quarter_bounds(year, quarter)
     due = _filing_due_date(year, quarter)
 
-    stubs = (
-        db.query(PayStub)
-        .join(PayRun, PayStub.pay_run_id == PayRun.id)
-        .filter(
-            PayRun.status == PayRunStatus.PROCESSED,
-            PayRun.pay_date >= start,
-            PayRun.pay_date <= end,
+    if stubs is None:
+        stubs = (
+            db.query(PayStub)
+            .join(PayRun, PayStub.pay_run_id == PayRun.id)
+            .filter(
+                PayRun.status == PayRunStatus.PROCESSED,
+                PayRun.pay_date >= start,
+                PayRun.pay_date <= end,
+            )
+            .all()
         )
-        .all()
-    )
 
     federal_income = sum((_q(s.federal_tax) for s in stubs), Decimal("0"))
     ss = sum((_q(s.ss_tax) + _q(s.employer_ss_tax) for s in stubs), Decimal("0"))

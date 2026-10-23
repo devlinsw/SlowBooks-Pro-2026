@@ -75,6 +75,12 @@
 - Valid pre-effective U.S. history remains available as historical U.S. data and is never relabeled as Canadian.
 - The date-free U.S. overtime classifier cannot silently apply its default/FLSA rule to a Canadian province or Canadian work period. Canadian and unsupported Canadian jurisdictions fail before `classify_period` is invoked. U.S. behavior with no Canadian jurisdiction history remains covered.
 - API/UI responses do not imply that Canadian calculations, stubs, or YTD are supported.
+- Every payroll-backed U.S. tax-form output is guarded: `/api/tax-forms/{941,941/pdf,940,940/pdf,w2,w2/{employee_id},w2/{employee_id}/pdf,sui,liability}` and JSON/PDF GET+POST `/api/payroll/forms/{w2/{emp_id},w3/{year},940/{year},941/{year}/{quarter}}[/pdf]`. Do not apply this guard to vendor-bill-backed 1099/1096 routes.
+- Annual W-2/W-3/940 periods use inclusive calendar-year bounds; SUI/liability use the inclusive quarter. Form 941 validates both its quarter and every contributor in its January 1–quarter-end YTD window.
+- Under the shared company/employee jurisdiction lock, select the exact processed contributor set, outer-join to detect orphan stubs, and validate every contributor's full inclusive pay period plus company and employee jurisdiction snapshots before U.S. calculation. A pay date before Canadian activation does not make a run safe when its full period crosses the boundary.
+- Canadian/boundary periods return 422, ambiguous/orphan history returns 409, and lock/jurisdiction-history DB read failures return a static generic 503 without database details. A period wholly before activation remains available as immutable U.S. history; no-history U.S. behavior and existing safe GET/POST statuses remain unchanged.
+- PDF calculation, audit hash, and renderer use one validated in-memory contributor set and the same computed data. Stage/flush the audit row, render while retaining the jurisdiction lock, and commit only after rendering; render failures roll back the uncommitted audit row. Rechecks acquire the lock before reading the audit row and do not recalculate unsafe periods. Audit list/get/verify metadata endpoints remain available.
+- The Tax Forms UI states U.S. forms cover wholly U.S. periods only, overlapping Canadian periods are blocked, Canadian forms are not implemented, and safe historical U.S. forms remain available without hiding the 1099/1096 contractor workflow.
 
 ## Task 4: Integration, evidence, and tracking
 

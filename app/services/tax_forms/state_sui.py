@@ -28,7 +28,9 @@ def _quarter_bounds(year: int, quarter: int) -> tuple[date, date]:
     return start, end
 
 
-def compute_sui(db, year: int, quarter: int, state: str | None = None) -> dict:
+def compute_sui(
+    db, year: int, quarter: int, state: str | None = None, stubs: list[PayStub] | None = None
+) -> dict:
     """Aggregate quarterly state unemployment (SUI/SUTA) totals.
 
     SUTA is an employer-side tax; the report lists SUTA-taxable wages and tax
@@ -36,18 +38,21 @@ def compute_sui(db, year: int, quarter: int, state: str | None = None) -> dict:
     matches are included.
     """
     start, end = _quarter_bounds(year, quarter)
-    stubs = (
-        db.query(PayStub)
-        .join(PayRun, PayStub.pay_run_id == PayRun.id)
-        .join(Employee, PayStub.employee_id == Employee.id)
-        .options(joinedload(PayStub.pay_run), joinedload(PayStub.employee))
-        .filter(PayRun.status == PayRunStatus.PROCESSED)
-        .filter(PayRun.pay_date >= start)
-        .filter(PayRun.pay_date <= end)
-    )
-    if state:
-        stubs = stubs.filter(Employee.work_state == state)
-    stubs = stubs.all()
+    if stubs is None:
+        query = (
+            db.query(PayStub)
+            .join(PayRun, PayStub.pay_run_id == PayRun.id)
+            .join(Employee, PayStub.employee_id == Employee.id)
+            .options(joinedload(PayStub.pay_run), joinedload(PayStub.employee))
+            .filter(PayRun.status == PayRunStatus.PROCESSED)
+            .filter(PayRun.pay_date >= start)
+            .filter(PayRun.pay_date <= end)
+        )
+        if state:
+            query = query.filter(Employee.work_state == state)
+        stubs = query.all()
+    elif state:
+        stubs = [s for s in stubs if s.employee and s.employee.work_state == state]
 
     # Accumulate per employee. SUTA-taxable wages are taken as the wages that
     # actually produced SUTA tax — we report gross alongside the SUTA tax that

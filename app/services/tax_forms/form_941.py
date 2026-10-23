@@ -40,10 +40,14 @@ def _quarter_bounds(year: int, quarter: int) -> tuple[date, date]:
     return start, end
 
 
-def _stubs_through_quarter(db, year: int, quarter: int) -> list[PayStub]:
+def _stubs_through_quarter(
+    db, year: int, quarter: int, stubs: list[PayStub] | None = None
+) -> list[PayStub]:
     """PROCESSED stubs from January 1 to the quarter's end, in pay order —
     the earlier quarters are what the Social Security wage base and the
     Additional Medicare threshold are measured against."""
+    if stubs is not None:
+        return sorted(stubs, key=lambda s: (s.pay_run.pay_date, s.id))
     _, end = _quarter_bounds(year, quarter)
     stubs = (
         db.query(PayStub)
@@ -88,7 +92,7 @@ def _additional_medicare_wages(fica_wages: Decimal, ytd_gross: Decimal) -> Decim
     return annual - MEDICARE_ADDITIONAL_THRESHOLD
 
 
-def compute_941(db, year: int, quarter: int) -> dict:
+def compute_941(db, year: int, quarter: int, stubs: list[PayStub] | None = None) -> dict:
     """Aggregate quarterly Form 941 totals.
 
     Returns wage, withholding and tax-liability totals for the quarter along
@@ -118,7 +122,7 @@ def compute_941(db, year: int, quarter: int) -> dict:
     # paycheck used for the wage base and the Additional Medicare threshold.
     ytd_gross: dict[int, Decimal] = {}
 
-    for s in _stubs_through_quarter(db, year, quarter):
+    for s in _stubs_through_quarter(db, year, quarter, stubs=stubs):
         gross = Decimal(str(s.gross_pay or 0))
         before = ytd_gross.get(s.employee_id, Decimal("0"))
         ytd_gross[s.employee_id] = before + gross
@@ -184,10 +188,17 @@ def compute_941(db, year: int, quarter: int) -> dict:
 
 
 def generate_941_pdf(
-    db, year: int, quarter: int, company: dict, audit: dict | None = None
+    db,
+    year: int,
+    quarter: int,
+    company: dict,
+    audit: dict | None = None,
+    *,
+    data: dict | None = None,
+    stubs: list[PayStub] | None = None,
 ) -> bytes:
     """Render Form 941 to a PDF for the given quarter."""
-    data = compute_941(db, year, quarter)
+    data = data if data is not None else compute_941(db, year, quarter, stubs=stubs)
     template = _jinja_env.get_template("form_941.html")
     html_str = template.render(data=data, company=company or {}, audit=audit or {})
     return render_pdf(html_str)

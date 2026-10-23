@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.document_audit import DocumentAudit
 from app.services.document_check import describe, recheck
+from app.services.tax_form_jurisdiction_guard import lock_tax_form_jurisdiction
 
 router = APIRouter(prefix="/api/document-audits", tags=["document-audit"])
 
@@ -102,6 +103,7 @@ def check_audit(audit_id: int, db: Session = Depends(get_db)):
     whether it still matches what was generated (#263). The verify route
     answers whether a hash is known; this answers whether the books behind
     a known form are as they were."""
+    lock_tax_form_jurisdiction(db)
     row = db.query(DocumentAudit).filter(DocumentAudit.id == audit_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Audit row not found")

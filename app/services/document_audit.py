@@ -52,7 +52,12 @@ def form_content_hash(company: dict, data: dict) -> str:
 
 
 def record_doc_audit(
-    db: Session, doc_type: str, doc_key: str, content_hash: str
+    db: Session,
+    doc_type: str,
+    doc_key: str,
+    content_hash: str,
+    *,
+    commit: bool = True,
 ) -> DocumentAudit:
     """Insert one DocumentAudit row and return it. The caller passes the
     same string into the PDF footer so the row and the printed page are
@@ -67,8 +72,10 @@ def record_doc_audit(
         username=_actor(db),
     )
     db.add(audit)
-    db.commit()
-    db.refresh(audit)
+    db.flush()
+    if commit:
+        db.commit()
+        db.refresh(audit)
     return audit
 
 

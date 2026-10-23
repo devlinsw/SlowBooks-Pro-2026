@@ -12,6 +12,11 @@ from app.models.payroll import Employee
 from app.services.tax_forms import form_941, form_940, w2_w3, state_sui, tax_liability
 from app.services import form_1099
 from app.services.payroll_documents import employer_block
+from app.services.tax_form_jurisdiction_guard import (
+    annual_us_contributors,
+    form_941_us_contributors,
+    quarterly_us_contributors,
+)
 from app.services.request_utils import content_disposition, file_name
 
 router = APIRouter(prefix="/api/tax-forms", tags=["tax-forms"])
@@ -46,7 +51,8 @@ def get_941(
     year: int = Query(...), quarter: int = Query(...), db: Session = Depends(get_db)
 ):
     _check_quarter(quarter)
-    return form_941.compute_941(db, year, quarter)
+    stubs = form_941_us_contributors(db, year, quarter)
+    return form_941.compute_941(db, year, quarter, stubs=stubs)
 
 
 @router.get("/941/pdf")
@@ -54,40 +60,55 @@ def get_941_pdf(
     year: int = Query(...), quarter: int = Query(...), db: Session = Depends(get_db)
 ):
     _check_quarter(quarter)
-    pdf = form_941.generate_941_pdf(db, year, quarter, _company(db))
+    stubs = form_941_us_contributors(db, year, quarter)
+    data = form_941.compute_941(db, year, quarter, stubs=stubs)
+    pdf = form_941.generate_941_pdf(
+        db, year, quarter, _company(db), data=data, stubs=stubs
+    )
     return _pdf(pdf, "941", year, f"Q{quarter}")
 
 
 # --- Form 940 — annual FUTA ------------------------------------------------
 @router.get("/940")
 def get_940(year: int = Query(...), db: Session = Depends(get_db)):
-    return form_940.compute_940(db, year)
+    stubs = annual_us_contributors(db, year)
+    return form_940.compute_940(db, year, stubs=stubs)
 
 
 @router.get("/940/pdf")
 def get_940_pdf(year: int = Query(...), db: Session = Depends(get_db)):
-    pdf = form_940.generate_940_pdf(db, year, _company(db))
+    stubs = annual_us_contributors(db, year)
+    data = form_940.compute_940(db, year, stubs=stubs)
+    pdf = form_940.generate_940_pdf(
+        db, year, _company(db), data=data, stubs=stubs
+    )
     return _pdf(pdf, "940", year)
 
 
 # --- W-2 / W-3 -------------------------------------------------------------
 @router.get("/w2")
 def get_all_w2(year: int = Query(...), db: Session = Depends(get_db)):
+    stubs = annual_us_contributors(db, year)
     return {
         "year": year,
-        "w3": w2_w3.compute_w3(db, year),
-        "w2": w2_w3.compute_all_w2(db, year),
+        "w3": w2_w3.compute_w3(db, year, stubs=stubs),
+        "w2": w2_w3.compute_all_w2(db, year, stubs=stubs),
     }
 
 
 @router.get("/w2/{employee_id}")
 def get_w2(employee_id: int, year: int = Query(...), db: Session = Depends(get_db)):
-    return w2_w3.compute_w2(db, year, employee_id)
+    stubs = annual_us_contributors(db, year, employee_id=employee_id)
+    return w2_w3.compute_w2(db, year, employee_id, stubs=stubs)
 
 
 @router.get("/w2/{employee_id}/pdf")
 def get_w2_pdf(employee_id: int, year: int = Query(...), db: Session = Depends(get_db)):
-    pdf = w2_w3.generate_w2_pdf(db, year, employee_id, _company(db))
+    stubs = annual_us_contributors(db, year, employee_id=employee_id)
+    data = w2_w3.compute_w2(db, year, employee_id, stubs=stubs)
+    pdf = w2_w3.generate_w2_pdf(
+        db, year, employee_id, _company(db), data=data, stubs=stubs
+    )
     emp = db.query(Employee).filter(Employee.id == employee_id).first()
     return _pdf(pdf, "W-2", year, emp.full_name if emp else None)
 
@@ -101,7 +122,8 @@ def get_sui(
     db: Session = Depends(get_db),
 ):
     _check_quarter(quarter)
-    return state_sui.compute_sui(db, year, quarter, state)
+    stubs = quarterly_us_contributors(db, year, quarter)
+    return state_sui.compute_sui(db, year, quarter, state, stubs=stubs)
 
 
 # --- Quarterly tax liability schedule --------------------------------------
@@ -111,7 +133,8 @@ def get_tax_liability(
 ):
     """What payroll tax is owed for the quarter, and when it is due."""
     _check_quarter(quarter)
-    return tax_liability.compute_tax_liability(db, year, quarter)
+    stubs = quarterly_us_contributors(db, year, quarter)
+    return tax_liability.compute_tax_liability(db, year, quarter, stubs=stubs)
 
 
 # --- 1099-NEC / 1096 -------------------------------------------------------

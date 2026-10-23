@@ -11,6 +11,10 @@ from app.services.document_audit import (
     record_doc_audit,
 )
 from app.services.payroll_documents import employer_block
+from app.services.tax_form_jurisdiction_guard import (
+    annual_us_contributors,
+    form_941_us_contributors,
+)
 from app.services.request_utils import content_disposition, file_name
 from app.services.tax_forms.form_940 import compute_940, generate_940_pdf
 from app.services.tax_forms.form_941 import compute_941, generate_941_pdf
@@ -35,6 +39,7 @@ def generate_w2_form(
     Returns a PDF file with the employee's W-2 data: gross, federal, state,
     SS, Medicare, and other withholdings for the calendar year.
     """
+    stubs = annual_us_contributors(db, year, employee_id=emp_id)
     emp = db.query(Employee).filter(Employee.id == emp_id).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -43,7 +48,7 @@ def generate_w2_form(
     # /pdf endpoint uses). The service applies the Social Security wage-base
     # cap to box 3 and reports box 4/box 6 as the actual taxes withheld; the
     # JSON shape below maps its keys onto the legacy box_N field names.
-    data = compute_w2(db, year, emp_id)
+    data = compute_w2(db, year, emp_id, stubs=stubs)
     company = employer_block(db)
     w2_data = {
         "box_1": str(data["box1_federal_wages"]),
@@ -78,7 +83,8 @@ def generate_w3_form(
     # Thin wrapper over compute_w3 — the same service the /pdf endpoint uses.
     # It aggregates every W-2 for the year (each built with the SS wage-base
     # cap applied) in a single pass.
-    data = compute_w3(db, year)
+    stubs = annual_us_contributors(db, year)
+    data = compute_w3(db, year, stubs=stubs)
     company = employer_block(db)
     w3_data = {
         "box_1": str(data["box1_federal_wages"]),
@@ -111,7 +117,8 @@ def generate_form_940(
     # Thin wrapper over compute_940 — the same service the /pdf endpoint uses.
     # It applies the $7,000 per-employee FUTA wage base across the year's pay
     # stubs in a single pass and reports the actual withheld FUTA tax.
-    data = compute_940(db, year)
+    stubs = annual_us_contributors(db, year)
+    data = compute_940(db, year, stubs=stubs)
     company = employer_block(db)
     form_940_data = {
         "box_1": str(data["futa_taxable_wages"]),  # Wages subject to FUTA
@@ -143,7 +150,8 @@ def generate_form_941(
     # Thin wrapper over compute_941 — the same service the /pdf endpoint uses.
     # It aggregates the quarter's PROCESSED pay stubs (single pass) into wage,
     # withholding and combined-FICA-tax totals.
-    data = compute_941(db, year, quarter)
+    stubs = form_941_us_contributors(db, year, quarter)
+    data = compute_941(db, year, quarter, stubs=stubs)
     company = employer_block(db)
     form_941_data = {
         "quarter": str(quarter),
@@ -199,13 +207,33 @@ def _pdf_response(pdf_bytes: bytes, *name) -> Response:
 
 
 def _hash_and_audit(
-    db: Session, doc_type: str, doc_key: str, company: dict, data: dict
+    db: Session,
+    doc_type: str,
+    doc_key: str,
+    company: dict,
+    data: dict,
+    *,
+    commit: bool = True,
 ) -> dict:
     """Hash the (company, data) pair, write the audit row, return the
     footer-context dict the templates expect."""
     content_hash = form_content_hash(company, data)
-    audit = record_doc_audit(db, doc_type, doc_key, content_hash)
+    audit = record_doc_audit(db, doc_type, doc_key, content_hash, commit=commit)
     return audit_footer_context(audit)
+
+
+def _render_audited_pdf(db, doc_type, doc_key, company, data, render):
+    """Stage the hash row, render its exact payload, then commit under the guard lock."""
+    try:
+        footer = _hash_and_audit(
+            db, doc_type, doc_key, company, data, commit=False
+        )
+        pdf = render(footer)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return pdf
 
 
 @router.get("/forms/w2/{emp_id}/pdf", response_class=Response)
@@ -216,14 +244,22 @@ def generate_w2_form_pdf(
     db: Session = Depends(get_db),
 ):
     """W-2 PDF for one employee for the given calendar year."""
+    stubs = annual_us_contributors(db, year, employee_id=emp_id)
     emp = db.query(Employee).filter(Employee.id == emp_id).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
     company = _company_for_pdf(db)
-    audit = _hash_and_audit(
-        db, "w2", f"emp{emp_id}-yr{year}", company, compute_w2(db, year, emp_id)
+    data = compute_w2(db, year, emp_id, stubs=stubs)
+    pdf = _render_audited_pdf(
+        db,
+        "w2",
+        f"emp{emp_id}-yr{year}",
+        company,
+        data,
+        lambda footer: generate_w2_pdf(
+            db, year, emp_id, company, audit=footer, data=data, stubs=stubs
+        ),
     )
-    pdf = generate_w2_pdf(db, year, emp_id, company, audit=audit)
     return _pdf_response(pdf, "W-2", year, emp.full_name)
 
 
@@ -231,9 +267,19 @@ def generate_w2_form_pdf(
 @router.post("/forms/w3/{year}/pdf", response_class=Response)
 def generate_w3_form_pdf(year: int, db: Session = Depends(get_db)):
     """W-3 transmittal PDF — aggregate across every W-2 for the year."""
+    stubs = annual_us_contributors(db, year)
     company = _company_for_pdf(db)
-    audit = _hash_and_audit(db, "w3", f"yr{year}", company, compute_w3(db, year))
-    pdf = generate_w3_pdf(db, year, company, audit=audit)
+    data = compute_w3(db, year, stubs=stubs)
+    pdf = _render_audited_pdf(
+        db,
+        "w3",
+        f"yr{year}",
+        company,
+        data,
+        lambda footer: generate_w3_pdf(
+            db, year, company, audit=footer, data=data, stubs=stubs
+        ),
+    )
     return _pdf_response(pdf, "W-3", year)
 
 
@@ -241,9 +287,19 @@ def generate_w3_form_pdf(year: int, db: Session = Depends(get_db)):
 @router.post("/forms/940/{year}/pdf", response_class=Response)
 def generate_form_940_pdf(year: int, db: Session = Depends(get_db)):
     """Form 940 (FUTA) PDF for the given calendar year."""
+    stubs = annual_us_contributors(db, year)
     company = _company_for_pdf(db)
-    audit = _hash_and_audit(db, "940", f"yr{year}", company, compute_940(db, year))
-    pdf = generate_940_pdf(db, year, company, audit=audit)
+    data = compute_940(db, year, stubs=stubs)
+    pdf = _render_audited_pdf(
+        db,
+        "940",
+        f"yr{year}",
+        company,
+        data,
+        lambda footer: generate_940_pdf(
+            db, year, company, audit=footer, data=data, stubs=stubs
+        ),
+    )
     return _pdf_response(pdf, "940", year)
 
 
@@ -253,13 +309,23 @@ def generate_form_941_pdf(year: int, quarter: int, db: Session = Depends(get_db)
     """Form 941 (quarterly FICA) PDF for year + quarter."""
     if quarter not in (1, 2, 3, 4):
         raise HTTPException(status_code=400, detail="quarter must be 1-4")
+    stubs = form_941_us_contributors(db, year, quarter)
     company = _company_for_pdf(db)
-    audit = _hash_and_audit(
+    data = compute_941(db, year, quarter, stubs=stubs)
+    pdf = _render_audited_pdf(
         db,
         "941",
         f"yr{year}-q{quarter}",
         company,
-        compute_941(db, year, quarter),
+        data,
+        lambda footer: generate_941_pdf(
+            db,
+            year,
+            quarter,
+            company,
+            audit=footer,
+            data=data,
+            stubs=stubs,
+        ),
     )
-    pdf = generate_941_pdf(db, year, quarter, company, audit=audit)
     return _pdf_response(pdf, "941", year, f"Q{quarter}")

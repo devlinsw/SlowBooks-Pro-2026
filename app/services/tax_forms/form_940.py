@@ -17,8 +17,10 @@ from app.services.payroll_service import FUTA_WAGE_BASE
 from app.services.pdf_service import _jinja_env, render_pdf
 
 
-def _year_stubs(db, year: int) -> list[PayStub]:
+def _year_stubs(db, year: int, stubs: list[PayStub] | None = None) -> list[PayStub]:
     """All PROCESSED pay stubs with a pay_date inside the calendar year."""
+    if stubs is not None:
+        return stubs
     start = date(year, 1, 1)
     end = date(year, 12, 31)
     return (
@@ -32,13 +34,13 @@ def _year_stubs(db, year: int) -> list[PayStub]:
     )
 
 
-def compute_940(db, year: int) -> dict:
+def compute_940(db, year: int, stubs: list[PayStub] | None = None) -> dict:
     """Aggregate annual Form 940 (FUTA) totals.
 
     FUTA taxable wages are computed per employee, capped at the $7,000 wage
     base; payments above the cap are exempt.
     """
-    stubs = _year_stubs(db, year)
+    stubs = _year_stubs(db, year, stubs=stubs)
 
     total_payments = Decimal("0")
     futa_tax = Decimal("0")
@@ -87,9 +89,17 @@ def compute_940(db, year: int) -> dict:
     }
 
 
-def generate_940_pdf(db, year: int, company: dict, audit: dict | None = None) -> bytes:
+def generate_940_pdf(
+    db,
+    year: int,
+    company: dict,
+    audit: dict | None = None,
+    *,
+    data: dict | None = None,
+    stubs: list[PayStub] | None = None,
+) -> bytes:
     """Render Form 940 to a PDF for the given year."""
-    data = compute_940(db, year)
+    data = data if data is not None else compute_940(db, year, stubs=stubs)
     template = _jinja_env.get_template("form_940.html")
     html_str = template.render(data=data, company=company or {}, audit=audit or {})
     return render_pdf(html_str)

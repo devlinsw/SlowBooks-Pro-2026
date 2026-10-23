@@ -17,8 +17,12 @@ from app.services.payroll_service import SS_WAGE_BASE
 from app.services.pdf_service import _jinja_env, render_pdf
 
 
-def _year_stubs(db, year: int, employee_id: int | None = None) -> list[PayStub]:
+def _year_stubs(
+    db, year: int, employee_id: int | None = None, stubs: list[PayStub] | None = None
+) -> list[PayStub]:
     """PROCESSED pay stubs in the calendar year, optionally for one employee."""
+    if stubs is not None:
+        return [s for s in stubs if employee_id is None or s.employee_id == employee_id]
     start = date(year, 1, 1)
     end = date(year, 12, 31)
     query = (
@@ -107,14 +111,14 @@ def _build_w2(
     return result
 
 
-def compute_w2(db, year: int, employee_id: int) -> dict:
+def compute_w2(db, year: int, employee_id: int, stubs: list[PayStub] | None = None) -> dict:
     """Annual W-2 wage statement for one employee."""
     employee = db.query(Employee).filter(Employee.id == employee_id).first()
-    stubs = _year_stubs(db, year, employee_id)
+    stubs = _year_stubs(db, year, employee_id, stubs=stubs)
     return _build_w2(year, employee_id, employee, stubs)
 
 
-def compute_all_w2(db, year: int) -> list[dict]:
+def compute_all_w2(db, year: int, stubs: list[PayStub] | None = None) -> list[dict]:
     """W-2 statements for every employee with wages in the year.
 
     Single-pass: fetch every PROCESSED stub for the year ONCE (with the
@@ -122,7 +126,7 @@ def compute_all_w2(db, year: int) -> list[dict]:
     W-2 from the in-memory group — no per-employee re-query (fixes the N+1
     that compute_w2-in-a-loop would otherwise produce).
     """
-    stubs = _year_stubs(db, year)
+    stubs = _year_stubs(db, year, stubs=stubs)
 
     by_employee: dict[int, list] = {}
     employees: dict[int, Employee] = {}
@@ -159,9 +163,9 @@ def _has_wages(w2: dict) -> bool:
     return any(w2.get(k) for k in _AMOUNT_KEYS)
 
 
-def compute_w3(db, year: int) -> dict:
+def compute_w3(db, year: int, stubs: list[PayStub] | None = None) -> dict:
     """W-3 transmittal — totals across every W-2 for the year."""
-    w2s = compute_all_w2(db, year)
+    w2s = compute_all_w2(db, year, stubs=stubs)
 
     totals = {
         "box1_federal_wages": Decimal("0"),
@@ -185,20 +189,35 @@ def compute_w3(db, year: int) -> dict:
 
 
 def generate_w2_pdf(
-    db, year: int, employee_id: int, company: dict, audit: dict | None = None
+    db,
+    year: int,
+    employee_id: int,
+    company: dict,
+    audit: dict | None = None,
+    *,
+    data: dict | None = None,
+    stubs: list[PayStub] | None = None,
 ) -> bytes:
     """Render a single employee's W-2 to a PDF. `audit` carries the audit-row
     id/hash/timestamp the footer prints; the caller computes it via
     services.document_audit."""
-    data = compute_w2(db, year, employee_id)
+    data = data if data is not None else compute_w2(db, year, employee_id, stubs=stubs)
     template = _jinja_env.get_template("w2.html")
     html_str = template.render(data=data, company=company or {}, audit=audit or {})
     return render_pdf(html_str)
 
 
-def generate_w3_pdf(db, year: int, company: dict, audit: dict | None = None) -> bytes:
+def generate_w3_pdf(
+    db,
+    year: int,
+    company: dict,
+    audit: dict | None = None,
+    *,
+    data: dict | None = None,
+    stubs: list[PayStub] | None = None,
+) -> bytes:
     """Render the W-3 transmittal (aggregate across all W-2s) to a PDF."""
-    data = compute_w3(db, year)
+    data = data if data is not None else compute_w3(db, year, stubs=stubs)
     template = _jinja_env.get_template("w3.html")
     html_str = template.render(data=data, company=company or {}, audit=audit or {})
     return render_pdf(html_str)

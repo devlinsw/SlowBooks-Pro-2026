@@ -25,6 +25,7 @@ from app.services.payroll_documents import employer_block
 from app.services.tax_forms.form_940 import compute_940
 from app.services.tax_forms.form_941 import compute_941
 from app.services.tax_forms.w2_w3 import compute_w2, compute_w3
+from app.services.tax_form_jurisdiction_guard import map_audit_form_contributors
 
 FORM_NAMES = {"w2": "W-2", "w3": "W-3", "940": "Form 940", "941": "Form 941"}
 
@@ -101,8 +102,23 @@ def recheck(db: Session, audit: DocumentAudit) -> dict:
     """Re-figure the form from today's books and compare its hash with the
     one it was generated with. `matches` is None when it cannot be
     re-figured (the employee is gone, or the key isn't a form's)."""
-    form, subject = describe(db, audit)
     parsed = _parse(audit)
+    if not parsed:
+        form, subject = describe(db, audit)
+        out = {
+            "id": audit.id,
+            "form": form,
+            "subject": subject,
+            "generated_hash": audit.content_hash,
+            "current_hash": None,
+            "matches": None,
+            "voided_runs": 0,
+            "message": f"Cannot be re-figured: {form} is not a form this page knows.",
+        }
+        return out
+
+    stubs = map_audit_form_contributors(db, parsed)
+    form, subject = describe(db, audit)
     out = {
         "id": audit.id,
         "form": form,
@@ -113,9 +129,6 @@ def recheck(db: Session, audit: DocumentAudit) -> dict:
         "voided_runs": 0,
         "message": "",
     }
-    if not parsed:
-        out["message"] = f"Cannot be re-figured: {form} is not a form this page knows."
-        return out
     if "employee_id" in parsed:
         emp = db.query(Employee).filter(Employee.id == parsed["employee_id"]).first()
         if not emp:
@@ -124,13 +137,13 @@ def recheck(db: Session, audit: DocumentAudit) -> dict:
                 f"{parsed['year']} was for is no longer on file."
             )
             return out
-        data = compute_w2(db, parsed["year"], parsed["employee_id"])
+        data = compute_w2(db, parsed["year"], parsed["employee_id"], stubs=stubs)
     elif audit.doc_type == "w3":
-        data = compute_w3(db, parsed["year"])
+        data = compute_w3(db, parsed["year"], stubs=stubs)
     elif audit.doc_type == "940":
-        data = compute_940(db, parsed["year"])
+        data = compute_940(db, parsed["year"], stubs=stubs)
     else:
-        data = compute_941(db, parsed["year"], parsed["quarter"])
+        data = compute_941(db, parsed["year"], parsed["quarter"], stubs=stubs)
 
     current = form_content_hash(employer_block(db), data)
     voided = _voided_runs(db, parsed)
