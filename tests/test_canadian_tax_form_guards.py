@@ -217,6 +217,91 @@ def test_safe_pre_activation_period_and_no_history_keep_us_output(client, db_ses
     assert no_history_response.status_code == 200, no_history_response.text
 
 
+def test_nonempty_pre_activation_history_remains_available_through_json_and_pdfs(
+    client, db_session, monkeypatch
+):
+    from io import BytesIO
+
+    from pypdf import PdfReader
+
+    from app.routes import payroll_jurisdiction
+    from app.services import payroll_jurisdiction_service
+
+    server_today = date(2025, 10, 23)
+
+    class FrozenDate(date):
+        @classmethod
+        def today(cls):
+            return server_today
+
+    monkeypatch.setattr(payroll_jurisdiction, "date", FrozenDate)
+    monkeypatch.setattr(payroll_jurisdiction_service, "date", FrozenDate)
+
+    employee = _employee(client)
+    _seed_run(
+        db_session,
+        employee["id"],
+        period_start=date(2025, 12, 1),
+        period_end=date(2025, 12, 14),
+        pay_date=date(2025, 12, 15),
+    )
+    activation = client.post(
+        "/api/settings/payroll-jurisdiction",
+        json={"country_code": "CA", "effective_from": "2026-01-01"},
+    )
+    assert activation.status_code == 201, activation.text
+    assert activation.json()["effective_from"] == "2026-01-01"
+    # Restore date type checks for database-loaded ordinary date values.
+    monkeypatch.setattr(payroll_jurisdiction_service, "date", date)
+
+    json_paths = [
+        f"/api/payroll/forms/w2/{employee['id']}?year=2025",
+        "/api/payroll/forms/w3/2025",
+        "/api/payroll/forms/940/2025",
+        "/api/payroll/forms/941/2025/4",
+    ]
+    for path in json_paths:
+        response = client.post(path)
+        assert response.status_code == 200, f"{path}: {response.text}"
+        assert response.json()["box_1"] == "1000.00", path
+
+    pdf_paths = [
+        ("GET", f"/api/payroll/forms/w2/{employee['id']}/pdf?year=2025", "FORM W-2"),
+        ("POST", f"/api/payroll/forms/w2/{employee['id']}/pdf?year=2025", "FORM W-2"),
+        ("GET", "/api/payroll/forms/w3/2025/pdf", "FORM W-3"),
+        ("POST", "/api/payroll/forms/w3/2025/pdf", "FORM W-3"),
+        ("GET", "/api/payroll/forms/940/2025/pdf", "FORM 940"),
+        ("POST", "/api/payroll/forms/940/2025/pdf", "FORM 940"),
+        ("GET", "/api/payroll/forms/941/2025/4/pdf", "FORM 941"),
+        ("POST", "/api/payroll/forms/941/2025/4/pdf", "FORM 941"),
+    ]
+    for method, path, title in pdf_paths:
+        response = client.request(method, path)
+        assert response.status_code == 200, f"{method} {path}: {response.text}"
+        assert response.headers["content-type"] == "application/pdf"
+        assert response.content.startswith(b"%PDF-")
+        assert len(response.content) > 1024
+        text = "\n".join(
+            page.extract_text() or ""
+            for page in PdfReader(BytesIO(response.content)).pages
+        )
+        assert title in text, path
+        assert "$1,000.00" in text, path
+        if "/w2/" in path:
+            assert "Taylor Taxform" in text
+
+    legacy_pdf = client.get("/api/tax-forms/940/pdf?year=2025")
+    assert legacy_pdf.status_code == 200, legacy_pdf.text
+    assert legacy_pdf.headers["content-type"] == "application/pdf"
+    assert legacy_pdf.content.startswith(b"%PDF-")
+    legacy_text = "\n".join(
+        page.extract_text() or ""
+        for page in PdfReader(BytesIO(legacy_pdf.content)).pages
+    )
+    assert "FORM 940" in legacy_text
+    assert "$1,000.00" in legacy_text
+
+
 def test_contributor_full_period_crossing_activation_blocks_pre_activation_tax_year(
     client, db_session, monkeypatch
 ):
@@ -341,6 +426,63 @@ def test_orphan_processed_stub_is_ambiguous_not_silently_omitted(client, db_sess
     assert response.status_code == 409, response.text
 
 
+def test_missing_employee_in_processed_stub_blocks_w2_before_calculation(
+    client, db_session, monkeypatch
+):
+    from app.routes import tax_forms
+
+    _seed_run(
+        db_session,
+        999999,
+        period_start=date(2025, 12, 1),
+        period_end=date(2025, 12, 14),
+        pay_date=date(2025, 12, 15),
+    )
+    calculations = []
+
+    def compute_w3(*args, **kwargs):
+        calculations.append("w3")
+        return _form_stubs()
+
+    def compute_all_w2(*args, **kwargs):
+        calculations.append("all_w2")
+        return [_form_stubs()]
+
+    monkeypatch.setattr(tax_forms.w2_w3, "compute_w3", compute_w3)
+    monkeypatch.setattr(tax_forms.w2_w3, "compute_all_w2", compute_all_w2)
+
+    response = client.get("/api/tax-forms/w2?year=2025")
+
+    assert response.status_code == 409, response.text
+    assert calculations == []
+
+
+def test_missing_employee_in_state_filtered_sui_blocks_before_calculation(
+    client, db_session, monkeypatch
+):
+    from app.routes import tax_forms
+
+    _seed_run(
+        db_session,
+        999999,
+        period_start=date(2025, 10, 1),
+        period_end=date(2025, 10, 14),
+        pay_date=date(2025, 10, 15),
+    )
+    calculations = []
+
+    def compute_sui(*args, **kwargs):
+        calculations.append((args, kwargs))
+        return {}
+
+    monkeypatch.setattr(tax_forms.state_sui, "compute_sui", compute_sui)
+
+    response = client.get("/api/tax-forms/sui?year=2025&quarter=4&state=WA")
+
+    assert response.status_code == 409, response.text
+    assert calculations == []
+
+
 def test_ambiguous_country_history_blocks_output_with_conflict(client, db_session):
     from app.models.payroll_jurisdiction import PayrollJurisdiction
 
@@ -386,6 +528,87 @@ def test_jurisdiction_history_database_failure_is_generic_503(client, db_session
     assert response.status_code == 503, response.text
     assert response.json()["detail"] == "Payroll jurisdiction history is temporarily unavailable."
     assert "private database" not in response.text
+
+
+def test_paystub_contributor_query_database_error_is_generic_503(
+    db_session, monkeypatch
+):
+    from fastapi import HTTPException
+    from sqlalchemy.orm import Query
+
+    from app.services.tax_form_jurisdiction_guard import load_us_tax_form_contributors
+
+    real_all = Query.all
+
+    def fail_only_paystub_query(query):
+        entity = query.column_descriptions[0].get("entity")
+        if entity is PayStub:
+            raise SQLAlchemyError("private contributor query details")
+        return real_all(query)
+
+    monkeypatch.setattr(Query, "all", fail_only_paystub_query)
+
+    with pytest.raises(HTTPException) as exc_info:
+        load_us_tax_form_contributors(
+            db_session, date(2025, 1, 1), date(2025, 12, 31)
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == (
+        "Payroll jurisdiction history is temporarily unavailable."
+    )
+    assert "private contributor query" not in str(exc_info.value)
+
+
+def test_unsupported_lock_backend_maps_to_generic_503():
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.services.tax_form_jurisdiction_guard import lock_tax_form_jurisdiction
+
+    class UnsupportedDialectSession:
+        info = {}
+        rolled_back = False
+
+        def get_transaction(self):
+            return None
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="mysql"))
+
+        def execute(self, statement):
+            pytest.fail("unsupported dialect must not execute a lock statement")
+
+        def rollback(self):
+            self.rolled_back = True
+
+    db = UnsupportedDialectSession()
+
+    with pytest.raises(HTTPException) as exc_info:
+        lock_tax_form_jurisdiction(db)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == (
+        "Payroll jurisdiction history is temporarily unavailable."
+    )
+    assert db.rolled_back is True
+
+
+def test_unexpected_lock_runtime_error_propagates(monkeypatch):
+    from app.services import tax_form_jurisdiction_guard
+
+    def fail_unexpectedly(_db):
+        raise RuntimeError("unexpected programming failure")
+
+    monkeypatch.setattr(
+        tax_form_jurisdiction_guard,
+        "lock_company_payroll_jurisdiction",
+        fail_unexpectedly,
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected programming failure"):
+        tax_form_jurisdiction_guard.lock_tax_form_jurisdiction(object())
 
 
 def test_tax_form_ui_explains_us_period_boundary_without_hiding_history_or_1099():

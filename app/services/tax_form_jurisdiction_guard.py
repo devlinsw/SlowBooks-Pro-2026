@@ -14,6 +14,7 @@ from sqlalchemy.orm import joinedload, selectinload
 from app.models.payroll import PayRun, PayRunStatus, PayStub
 from app.services.payroll_jurisdiction_service import (
     PayrollJurisdictionAmbiguous,
+    PayrollJurisdictionLockUnsupported,
     PayrollJurisdictionPeriodBoundary,
     is_us_payroll_period,
     lock_company_payroll_jurisdiction,
@@ -53,9 +54,7 @@ def lock_tax_form_jurisdiction(db) -> None:
     """Acquire the shared lock before any tax-form-specific database read."""
     try:
         lock_company_payroll_jurisdiction(db)
-    except Exception as exc:
-        # The lock implementation deliberately raises for unsupported backends
-        # as well as DB failures. Never expose the underlying reason to callers.
+    except (PayrollJurisdictionLockUnsupported, SQLAlchemyError) as exc:
         raise HTTPException(status_code=503, detail=_UNAVAILABLE_DETAIL) from exc
 
 
@@ -118,13 +117,13 @@ def load_us_tax_form_contributors(
     if employee_id is not None:
         query = query.filter(PayStub.employee_id == employee_id)
 
-    # The join itself is outside the jurisdiction-read exception boundary:
-    # contributor-query failures remain ordinary request failures, not errors
-    # mislabeled as jurisdiction-history outages.
-    stubs = query.all()
+    try:
+        stubs = query.all()
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail=_UNAVAILABLE_DETAIL) from exc
     for stub in stubs:
         run = stub.pay_run
-        if run is None:
+        if run is None or stub.employee is None:
             raise HTTPException(status_code=409, detail=_AMBIGUOUS_DETAIL)
         try:
             safe = is_us_payroll_period(

@@ -65,10 +65,12 @@
 
 **Objective:** Prevent U.S.-calculated Canadian-period data from leaking into Canadian outputs or being classified under U.S. overtime defaults.
 
-**Files:**
-- Modify: `app/routes/payroll/ytd.py`, `app/routes/employees.py`, `app/routes/payroll/exports.py`
-- Modify: `app/routes/time_entries.py`, `app/schemas/time_entries.py`, and `app/services/overtime.py` only where required for a safe guard
-- Test: YTD, employee-YTD, paystub/export, and overtime route tests
+**Files (payroll-backed U.S. tax-form guards and document-audit recheck):**
+- Modify routes: `app/routes/tax_forms.py`, `app/routes/payroll/tax_forms.py`, and `app/routes/document_audit.py`
+- Modify services: `app/services/tax_form_jurisdiction_guard.py`, `app/services/document_audit.py`, `app/services/document_check.py`, `app/services/tax_forms/form_940.py`, `app/services/tax_forms/form_941.py`, `app/services/tax_forms/state_sui.py`, `app/services/tax_forms/tax_liability.py`, and `app/services/tax_forms/w2_w3.py`
+- Modify UI: `app/static/js/tax_forms.js`
+- Test: `tests/test_canadian_tax_form_guards.py`
+- This inventory covers the payroll-backed tax-form guard and recheck work only; it adds no Canadian tax formulas and does not claim calculation or launch readiness.
 
 **Acceptance:**
 - Canadian-period legacy U.S. drafts are excluded from Canadian YTD and cannot produce a Canadian paystub; return a clear fail-closed response until Canadian YTD/paystub outputs exist.

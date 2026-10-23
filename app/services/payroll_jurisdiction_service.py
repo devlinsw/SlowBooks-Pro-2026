@@ -25,6 +25,10 @@ MIN_EFFECTIVE_DATE = date(2026, 1, 1)
 _GUARD_TRANSACTION_INFO_KEY = "payroll_jurisdiction_guard_transaction"
 
 
+class PayrollJurisdictionLockUnsupported(RuntimeError):
+    """The database dialect has no supported transaction lock implementation."""
+
+
 def lock_company_payroll_jurisdiction(db):
     """Acquire both jurisdiction table locks in stable order for this transaction.
 
@@ -59,7 +63,7 @@ def lock_company_payroll_jurisdiction(db):
                 )
             )
         else:
-            raise RuntimeError(
+            raise PayrollJurisdictionLockUnsupported(
                 f"Payroll jurisdiction guard locking is unsupported for {dialect}."
             )
     except Exception:
