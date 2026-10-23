@@ -301,6 +301,11 @@ def create_pay_run(data: PayRunCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; pay-run creation is blocked.",
+        ) from exc
     jurisdiction_snapshot = _payroll_jurisdiction_snapshot(
         jurisdiction, data.pay_date
     )
@@ -941,6 +946,11 @@ def gross_up_paycheck(data: GrossUpRequest, db: Session = Depends(get_db)):
         history = list_company_payroll_jurisdictions(db)
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; gross-up calculation is blocked.",
+        ) from exc
     if history and data.pay_date is None:
         raise HTTPException(
             status_code=422,
@@ -950,8 +960,15 @@ def gross_up_paycheck(data: GrossUpRequest, db: Session = Depends(get_db)):
     pay_date = data.pay_date or date.today()
     try:
         jurisdiction = resolve_company_payroll_jurisdiction(db, pay_date)
+    except PayrollJurisdictionPeriodBoundary as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; gross-up calculation is blocked.",
+        ) from exc
     if jurisdiction is not None:
         raise HTTPException(
             status_code=422,
@@ -965,7 +982,7 @@ def gross_up_paycheck(data: GrossUpRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="target_net must be positive")
 
     year = pay_date.year
-    ytd_options = {"before": pay_date} if data.pay_date is not None else {}
+    ytd_options = {"before": pay_date}
     ytd_stubs = _validated_ytd_stubs(
         db, emp.id, year, before=ytd_options.get("before")
     )

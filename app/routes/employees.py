@@ -471,6 +471,11 @@ def get_employee_ytd(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; employee YTD is blocked.",
+        ) from exc
     if not safe:
         raise HTTPException(
             status_code=422,

@@ -1,6 +1,6 @@
 """Fail closed when U.S. calculations or YTD totals use unsafe run history."""
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import Mock
 
@@ -195,7 +195,11 @@ def test_unsafe_last_regular_gross_blocks_aggregate_supplemental_calculation(
         pay_date=date(2026, 12, 31),
         gross=1200,
     )
+    ytd_spy = Mock(wraps=payroll_runs.employee_ytd)
+    supplemental_ytd_spy = Mock(wraps=payroll_runs._ytd_supplemental)
     withholding_spy = Mock(wraps=payroll_runs.calculate_withholdings)
+    monkeypatch.setattr(payroll_runs, "employee_ytd", ytd_spy)
+    monkeypatch.setattr(payroll_runs, "_ytd_supplemental", supplemental_ytd_spy)
     monkeypatch.setattr(payroll_runs, "calculate_withholdings", withholding_spy)
 
     response = client.post(
@@ -216,6 +220,8 @@ def test_unsafe_last_regular_gross_blocks_aggregate_supplemental_calculation(
     )
 
     assert response.status_code == 422, response.text
+    ytd_spy.assert_not_called()
+    supplemental_ytd_spy.assert_not_called()
     withholding_spy.assert_not_called()
     assert db_session.query(StoredPayRun).count() == 1
     assert db_session.query(StoredPayStub).count() == 1
@@ -283,6 +289,181 @@ def test_safe_pre_canadian_ytd_is_used_and_later_canadian_run_is_excluded(
     assert ytd_spy.call_args.kwargs["stubs"]
     assert withholding_spy.call_args.kwargs["ytd_gross"] == Decimal("500")
     assert withholding_spy.call_args.kwargs["ytd_supplemental"] == Decimal("500")
+
+
+def test_default_gross_up_excludes_future_same_year_history_from_ytd_and_supplemental(
+    client, db_session, monkeypatch
+):
+    from app.routes.payroll import runs as payroll_runs
+
+    employee = _employee(client)
+    today = date(date.today().year, 1, 1)
+    mocked_date = Mock()
+    mocked_date.today.return_value = today
+    monkeypatch.setattr(payroll_runs, "date", mocked_date)
+    future_pay_date = today + timedelta(days=5)
+    assert future_pay_date > today
+    assert future_pay_date.year == today.year
+    _future_run, future_stub = _seed_run(
+        db_session,
+        employee["id"],
+        period_start=future_pay_date - timedelta(days=13),
+        period_end=future_pay_date,
+        pay_date=future_pay_date,
+        gross=25000,
+        federal=1000,
+        run_type=PayRunType.BONUS,
+    )
+    ytd_spy = Mock(wraps=payroll_runs.employee_ytd)
+    supplemental_spy = Mock(wraps=payroll_runs._ytd_supplemental)
+    withholding_spy = Mock(wraps=payroll_runs.calculate_withholdings)
+    monkeypatch.setattr(payroll_runs, "employee_ytd", ytd_spy)
+    monkeypatch.setattr(payroll_runs, "_ytd_supplemental", supplemental_spy)
+    monkeypatch.setattr(payroll_runs, "calculate_withholdings", withholding_spy)
+
+    response = client.post(
+        "/api/payroll/gross-up",
+        json={"employee_id": employee["id"], "target_net": 700, "supplemental": True},
+    )
+
+    assert response.status_code == 200, response.text
+    assert ytd_spy.call_args.kwargs["before"] == today
+    assert supplemental_spy.call_args.kwargs["before"] == today
+    ytd_stubs = ytd_spy.call_args.kwargs["stubs"]
+    supplemental_stubs = supplemental_spy.call_args.kwargs["stubs"]
+    assert ytd_stubs is supplemental_stubs
+    assert ytd_stubs == []
+    assert future_stub.id not in [stub.id for stub in ytd_stubs]
+    assert withholding_spy.called
+    assert all(
+        call.kwargs["ytd_gross"] == Decimal("0")
+        for call in withholding_spy.call_args_list
+    )
+    assert all(
+        call.kwargs["ytd_supplemental"] == Decimal("0")
+        for call in withholding_spy.call_args_list
+    )
+
+
+def test_employee_ytd_returns_generic_503_on_jurisdiction_history_read_error(
+    client, db_session, monkeypatch
+):
+    from app.models.payroll import PayRun as StoredPayRun
+    from app.models.payroll import PayStub as StoredPayStub
+    from app.routes import employees
+
+    employee = _employee(client)
+    ytd_spy = Mock(wraps=employees.employee_ytd)
+    monkeypatch.setattr(employees, "employee_ytd", ytd_spy)
+    runs_before = db_session.query(StoredPayRun).count()
+    stubs_before = db_session.query(StoredPayStub).count()
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("sensitive history query details")
+
+    monkeypatch.setattr(employees, "is_us_payroll_period", fail)
+
+    response = client.get(f"/api/employees/{employee['id']}/ytd?year=2026")
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == (
+        "Payroll jurisdiction status is unavailable; employee YTD is blocked."
+    )
+    assert "sensitive history query details" not in response.text
+    ytd_spy.assert_not_called()
+    assert db_session.query(StoredPayRun).count() == runs_before
+    assert db_session.query(StoredPayStub).count() == stubs_before
+
+
+def test_pay_run_returns_generic_503_on_jurisdiction_history_read_error(
+    client, db_session, monkeypatch
+):
+    from app.models.payroll import PayRun as StoredPayRun
+    from app.models.payroll import PayStub as StoredPayStub
+    from app.routes.payroll import runs as payroll_runs
+
+    employee = _employee(client)
+    ytd_spy = Mock(wraps=payroll_runs.employee_ytd)
+    withholding_spy = Mock(wraps=payroll_runs.calculate_withholdings)
+    monkeypatch.setattr(payroll_runs, "employee_ytd", ytd_spy)
+    monkeypatch.setattr(payroll_runs, "calculate_withholdings", withholding_spy)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("sensitive history query details")
+
+    monkeypatch.setattr(
+        payroll_runs, "resolve_company_payroll_jurisdiction_for_period", fail
+    )
+    runs_before = db_session.query(StoredPayRun).count()
+    stubs_before = db_session.query(StoredPayStub).count()
+
+    response = client.post(
+        "/api/payroll",
+        json={
+            "period_start": "2026-11-02",
+            "period_end": "2026-11-08",
+            "pay_date": "2026-11-10",
+            "stubs": [{"employee_id": employee["id"], "gross_override": 900}],
+        },
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == (
+        "Payroll jurisdiction status is unavailable; pay-run creation is blocked."
+    )
+    assert "sensitive history query details" not in response.text
+    ytd_spy.assert_not_called()
+    withholding_spy.assert_not_called()
+    assert db_session.query(StoredPayRun).count() == runs_before
+    assert db_session.query(StoredPayStub).count() == stubs_before
+
+
+@pytest.mark.parametrize("failure_stage", ["history", "resolve"])
+def test_gross_up_returns_generic_503_on_jurisdiction_history_read_error(
+    client, db_session, monkeypatch, failure_stage
+):
+    from app.models.payroll import PayRun as StoredPayRun
+    from app.models.payroll import PayStub as StoredPayStub
+    from app.routes.payroll import runs as payroll_runs
+
+    employee = _employee(client)
+    ytd_spy = Mock(wraps=payroll_runs.employee_ytd)
+    supplemental_spy = Mock(wraps=payroll_runs._ytd_supplemental)
+    withholding_spy = Mock(wraps=payroll_runs.calculate_withholdings)
+    monkeypatch.setattr(payroll_runs, "employee_ytd", ytd_spy)
+    monkeypatch.setattr(payroll_runs, "_ytd_supplemental", supplemental_spy)
+    monkeypatch.setattr(payroll_runs, "calculate_withholdings", withholding_spy)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("sensitive history query details")
+
+    if failure_stage == "history":
+        monkeypatch.setattr(payroll_runs, "list_company_payroll_jurisdictions", fail)
+    else:
+        monkeypatch.setattr(
+            payroll_runs, "list_company_payroll_jurisdictions", lambda _db: []
+        )
+        monkeypatch.setattr(
+            payroll_runs, "resolve_company_payroll_jurisdiction", fail
+        )
+    runs_before = db_session.query(StoredPayRun).count()
+    stubs_before = db_session.query(StoredPayStub).count()
+
+    response = client.post(
+        "/api/payroll/gross-up",
+        json={"employee_id": employee["id"], "target_net": 700, "supplemental": True},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == (
+        "Payroll jurisdiction status is unavailable; gross-up calculation is blocked."
+    )
+    assert "sensitive history query details" not in response.text
+    ytd_spy.assert_not_called()
+    supplemental_spy.assert_not_called()
+    withholding_spy.assert_not_called()
+    assert db_session.query(StoredPayRun).count() == runs_before
+    assert db_session.query(StoredPayStub).count() == stubs_before
 
 
 def test_employee_ytd_treats_orphaned_stub_as_ambiguous(client, db_session):

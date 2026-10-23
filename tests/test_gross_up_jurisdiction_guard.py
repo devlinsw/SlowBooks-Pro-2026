@@ -67,7 +67,7 @@ def test_active_canadian_jurisdiction_blocks_gross_up_before_us_tax_calculation(
     withholding_spy.assert_not_called()
 
 
-def test_no_history_gross_up_keeps_legacy_date_free_ytd_behavior(client, monkeypatch):
+def test_no_history_gross_up_uses_today_when_pay_date_is_omitted(client, monkeypatch):
     from app.routes.payroll import runs as payroll_runs
 
     employee = _employee(client)
@@ -80,13 +80,16 @@ def test_no_history_gross_up_keeps_legacy_date_free_ytd_behavior(client, monkeyp
 
     assert response.status_code == 200, response.text
     assert ytd_spy.call_args.args[1:] == (employee["id"], date.today().year)
-    assert ytd_spy.call_args.kwargs == {"stubs": []}
+    assert ytd_spy.call_args.kwargs == {"stubs": [], "before": date.today()}
     supplemental_ytd_spy.assert_called_once()
     assert supplemental_ytd_spy.call_args.args[1:] == (
         employee["id"],
         date.today().year,
     )
-    assert supplemental_ytd_spy.call_args.kwargs == {"stubs": []}
+    assert supplemental_ytd_spy.call_args.kwargs == {
+        "stubs": [],
+        "before": date.today(),
+    }
 
 
 def test_future_only_jurisdiction_keeps_pre_effective_us_gross_up_behavior(client):
