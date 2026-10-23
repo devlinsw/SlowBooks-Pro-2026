@@ -38,6 +38,8 @@ from app.services.payroll_jurisdiction_service import (
     PayrollJurisdictionAmbiguous,
     PayrollJurisdictionPeriodBoundary,
     lock_company_payroll_jurisdiction,
+    list_company_payroll_jurisdictions,
+    is_us_payroll_period,
     resolve_company_payroll_jurisdiction,
     resolve_company_payroll_jurisdiction_for_period,
 )
@@ -69,22 +71,79 @@ def _payroll_jurisdiction_snapshot(
     }
 
 
+def _lock_payroll_read(db: Session, message: str) -> None:
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=message) from exc
+
+
+def _require_us_run_output(db: Session, run: PayRun) -> None:
+    try:
+        safe = is_us_payroll_period(
+            db,
+            run.period_start,
+            run.period_end,
+            jurisdiction_snapshot=run.jurisdiction_snapshot,
+        )
+    except PayrollJurisdictionPeriodBoundary as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not safe:
+        raise HTTPException(
+            status_code=422,
+            detail="U.S. payroll outputs are unavailable for Canadian payroll periods.",
+        )
+
+
 @router.get("", response_model=list[PayRunResponse])
 def list_pay_runs(skip: int = 0, limit: int = 200, db: Session = Depends(get_db)):
     skip, limit = clamp_pagination(skip, limit, max_limit=500)
-    runs = (
+    _lock_payroll_read(
+        db,
+        "Payroll jurisdiction status is unavailable; pay-run reads are blocked.",
+    )
+    query = (
         db.query(PayRun)
         .options(joinedload(PayRun.stubs).joinedload(PayStub.employee))
         .order_by(PayRun.pay_date.desc(), PayRun.id.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
     )
-    return [_with_employee_names(run) for run in runs]
+    safe_page = []
+    safe_count = 0
+    db_offset = 0
+    batch_size = 500
+    while len(safe_page) < limit:
+        batch = query.offset(db_offset).limit(batch_size).all()
+        if not batch:
+            break
+        for run in batch:
+            try:
+                safe = is_us_payroll_period(
+                    db,
+                    run.period_start,
+                    run.period_end,
+                    jurisdiction_snapshot=run.jurisdiction_snapshot,
+                )
+            except (PayrollJurisdictionAmbiguous, PayrollJurisdictionPeriodBoundary):
+                safe = False
+            if not safe:
+                continue
+            if safe_count >= skip:
+                safe_page.append(_with_employee_names(run))
+                if len(safe_page) == limit:
+                    break
+            safe_count += 1
+        db_offset += len(batch)
+    return safe_page
 
 
 @router.get("/{run_id}", response_model=PayRunResponse)
 def get_pay_run(run_id: int, db: Session = Depends(get_db)):
+    _lock_payroll_read(
+        db,
+        "Payroll jurisdiction status is unavailable; pay-run reads are blocked.",
+    )
     run = (
         db.query(PayRun)
         .options(joinedload(PayRun.stubs).joinedload(PayStub.employee))
@@ -93,6 +152,7 @@ def get_pay_run(run_id: int, db: Session = Depends(get_db)):
     )
     if not run:
         raise HTTPException(status_code=404, detail="Pay run not found")
+    _require_us_run_output(db, run)
     return _with_employee_names(run)
 
 
@@ -833,15 +893,19 @@ def gross_up_paycheck(data: GrossUpRequest, db: Session = Depends(get_db)):
             detail="Payroll jurisdiction status is unavailable; gross-up calculation is blocked.",
         ) from exc
 
-    emp = db.query(Employee).filter(Employee.id == data.employee_id).first()
-    if not emp:
-        raise HTTPException(status_code=404, detail="Employee not found")
-    if data.target_net <= 0:
-        raise HTTPException(status_code=400, detail="target_net must be positive")
-
-    today = date.today()
     try:
-        jurisdiction = resolve_company_payroll_jurisdiction(db, today)
+        history = list_company_payroll_jurisdictions(db)
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if history and data.pay_date is None:
+        raise HTTPException(
+            status_code=422,
+            detail="pay_date is required when payroll jurisdiction history exists.",
+        )
+
+    pay_date = data.pay_date or date.today()
+    try:
+        jurisdiction = resolve_company_payroll_jurisdiction(db, pay_date)
     except PayrollJurisdictionAmbiguous as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if jurisdiction is not None:
@@ -850,10 +914,19 @@ def gross_up_paycheck(data: GrossUpRequest, db: Session = Depends(get_db)):
             detail="Canadian gross-up calculation support is not enabled yet.",
         )
 
-    year = today.year
-    ytd = employee_ytd(db, emp.id, year)
+    emp = db.query(Employee).filter(Employee.id == data.employee_id).first()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    if data.target_net <= 0:
+        raise HTTPException(status_code=400, detail="target_net must be positive")
+
+    year = pay_date.year
+    ytd_options = {"before": pay_date} if data.pay_date is not None else {}
+    ytd = employee_ytd(db, emp.id, year, **ytd_options)
     ytd_suppl = (
-        _ytd_supplemental(db, emp.id, year) if data.supplemental else Decimal("0")
+        _ytd_supplemental(db, emp.id, year, **ytd_options)
+        if data.supplemental
+        else Decimal("0")
     )
     work_state = (emp.work_state or "WA").upper()
     wh_state = withholding_state(work_state, emp.residence_state)

@@ -18,13 +18,54 @@ from app.models.payroll import (
     PayRunStatus,
     Employee,
 )
+from app.services.payroll_jurisdiction_service import (
+    PayrollJurisdictionAmbiguous,
+    PayrollJurisdictionPeriodBoundary,
+    is_us_payroll_period,
+    lock_company_payroll_jurisdiction,
+)
 from app import config
+
+
+def _lock_output_read(db: Session) -> None:
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; payroll output is blocked.",
+        ) from exc
+
+
+def _require_us_output_period(db: Session, run: PayRun) -> None:
+    try:
+        safe = is_us_payroll_period(
+            db,
+            run.period_start,
+            run.period_end,
+            jurisdiction_snapshot=run.jurisdiction_snapshot,
+        )
+    except PayrollJurisdictionPeriodBoundary as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not safe:
+        raise HTTPException(
+            status_code=422,
+            detail="U.S. payroll outputs are unavailable for Canadian payroll periods.",
+        )
 
 
 @router.get("/{run_id}/paystub/{stub_id}")
 def download_paystub(run_id: int, stub_id: int, db: Session = Depends(get_db)):
     """Generate the PDF pay stub for one employee on a pay run."""
     from app.services.paystub_pdf import generate_paystub_pdf
+
+    _lock_output_read(db)
+    run = db.query(PayRun).filter(PayRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Pay run not found")
+    _require_us_output_period(db, run)
 
     stub = (
         db.query(PayStub)
@@ -33,7 +74,6 @@ def download_paystub(run_id: int, stub_id: int, db: Session = Depends(get_db)):
     )
     if not stub:
         raise HTTPException(status_code=404, detail="Pay stub not found")
-    run = db.query(PayRun).filter(PayRun.id == run_id).first()
     emp = db.query(Employee).filter(Employee.id == stub.employee_id).first()
 
     # Year to date means up to this pay date: the stubs of processed runs
@@ -89,9 +129,11 @@ def export_nacha(
     """Generate a NACHA ACH file for direct deposit of a processed pay run."""
     from app.services.nacha_export import generate_nacha_file
 
+    _lock_output_read(db)
     run = db.query(PayRun).filter(PayRun.id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="Pay run not found")
+    _require_us_output_period(db, run)
     if run.status != PayRunStatus.PROCESSED:
         raise HTTPException(
             status_code=400, detail="Pay run must be processed before ACH export"

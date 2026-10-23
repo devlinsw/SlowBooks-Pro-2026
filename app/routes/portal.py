@@ -36,9 +36,11 @@ from app.services.encryption import encrypt
 from app.services.nacha_export import validate_routing_number
 from app.services.payroll_jurisdiction_service import (
     PayrollJurisdictionAmbiguous,
+    PayrollJurisdictionPeriodBoundary,
     SUPPORTED_COUNTRY,
     SUPPORTED_PROVINCES,
     SUPPORTED_SCOPE,
+    is_us_payroll_period,
     lock_company_payroll_jurisdiction,
     resolve_company_payroll_jurisdiction,
 )
@@ -487,12 +489,42 @@ def portal_dashboard(request: Request, db: Session = Depends(get_db)):
 @router.get("/portal/paystubs")
 @limiter.limit("30/minute")
 def portal_paystubs(request: Request, db: Session = Depends(get_db)):
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; portal pay stubs are blocked.",
+        ) from exc
+
     emp = _employee_from_cookie(request, db)
-    stubs = [
-        stub
-        for stub in emp.pay_stubs
-        if stub.pay_run and stub.pay_run.status.value == "processed"
-    ]
+
+    # Authentication commits token-use and access-audit records. Reacquire the
+    # jurisdiction lock before loading or classifying any pay-stub history.
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; portal pay stubs are blocked.",
+        ) from exc
+
+    stubs = []
+    for stub in emp.pay_stubs:
+        run = stub.pay_run
+        if not run or run.status.value != "processed":
+            continue
+        try:
+            safe = is_us_payroll_period(
+                db,
+                run.period_start,
+                run.period_end,
+                jurisdiction_snapshot=run.jurisdiction_snapshot,
+            )
+        except (PayrollJurisdictionAmbiguous, PayrollJurisdictionPeriodBoundary):
+            safe = False
+        if safe:
+            stubs.append(stub)
     stubs.sort(key=lambda s: s.pay_run.pay_date, reverse=True)
     return _render("paystubs.html", db, emp=emp, stubs=stubs)
 

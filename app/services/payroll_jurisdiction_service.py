@@ -230,6 +230,25 @@ def resolve_company_payroll_jurisdiction_for_period(
     )
 
 
+def is_us_payroll_period(
+    db,
+    period_start: date,
+    period_end: date,
+    *,
+    jurisdiction_snapshot=None,
+):
+    """Whether a complete period can be exposed through U.S. payroll outputs.
+
+    Period boundaries and ambiguous history propagate as fail-closed errors.
+    A stored jurisdiction snapshot also prevents old rows from being exposed as
+    U.S. data even if the live company history was later removed or altered.
+    """
+    jurisdiction = resolve_company_payroll_jurisdiction_for_period(
+        db, period_start, period_end
+    )
+    return jurisdiction is None and jurisdiction_snapshot is None
+
+
 def list_company_payroll_jurisdictions(db):
     history = _ordered_history(db)
     _validate_history(history)

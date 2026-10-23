@@ -278,7 +278,7 @@ def test_ambiguous_jurisdiction_history_fails_closed_without_a_run(
     assert db_session.query(PayStub).count() == 0
 
 
-def test_snapshot_is_copied_and_api_reads_stored_value_after_timeline_changes(
+def test_canadian_snapshot_is_not_exposed_after_timeline_changes(
     client, db_session
 ):
     from app.models.payroll import PayRun
@@ -342,11 +342,10 @@ def test_snapshot_is_copied_and_api_reads_stored_value_after_timeline_changes(
         "effective_to": None,
         "pay_date": pay_date.isoformat(),
     }
-    assert detail.status_code == 200, detail.text
-    assert detail.json()["jurisdiction_snapshot"] == expected_snapshot
+    assert detail.status_code == 422, detail.text
+    assert "Canadian" in detail.json()["detail"]
     assert listing.status_code == 200, listing.text
-    listed_run = next(item for item in listing.json() if item["id"] == run_id)
-    assert listed_run["jurisdiction_snapshot"] == expected_snapshot
+    assert listing.json() == []
     assert later.province_code is None
     assert later_snapshot == {
         "jurisdiction_id": later.id,

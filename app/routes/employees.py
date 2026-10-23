@@ -49,9 +49,11 @@ from app.services.encryption import encrypt
 from app.services.nacha_export import validate_routing_number
 from app.services.payroll_jurisdiction_service import (
     PayrollJurisdictionAmbiguous,
+    PayrollJurisdictionPeriodBoundary,
     SUPPORTED_COUNTRY,
     SUPPORTED_PROVINCES,
     SUPPORTED_SCOPE,
+    is_us_payroll_period,
     lock_company_payroll_jurisdiction,
     resolve_company_payroll_jurisdiction,
 )
@@ -451,10 +453,32 @@ def get_employee_ytd(
     emp_id: int, year: int = Query(default=None), db: Session = Depends(get_db)
 ):
     """Year-to-date payroll totals for an employee (exposes the Bug 1 fix)."""
+    try:
+        lock_company_payroll_jurisdiction(db)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; employee YTD is blocked.",
+        ) from exc
+
+    year = year or date.today().year
+    try:
+        safe = is_us_payroll_period(
+            db, date(year, 1, 1), date(year, 12, 31)
+        )
+    except PayrollJurisdictionPeriodBoundary as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not safe:
+        raise HTTPException(
+            status_code=422,
+            detail="U.S. employee YTD is unavailable for years overlapping Canadian payroll.",
+        )
+
     emp = db.query(Employee).filter(Employee.id == emp_id).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
-    year = year or date.today().year
     totals = employee_ytd(db, emp_id, year)
     return YTDResponse(
         employee_id=emp_id,

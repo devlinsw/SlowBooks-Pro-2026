@@ -1,4 +1,6 @@
+from datetime import date
 from typing import Optional
+
 from pydantic import BaseModel
 from app.schemas.common import StrictModel
 
@@ -34,6 +36,7 @@ class GrossUpRequest(StrictModel):
     employee_id: int
     target_net: float
     supplemental: bool = True  # gross-ups are typically bonuses
+    pay_date: Optional[date] = None
 
 
 class GrossUpResponse(BaseModel):
