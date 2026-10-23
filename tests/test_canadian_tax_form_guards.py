@@ -302,6 +302,118 @@ def test_nonempty_pre_activation_history_remains_available_through_json_and_pdfs
     assert "$1,000.00" in legacy_text
 
 
+def test_legacy_tax_forms_keep_populated_safe_history_after_canada_activation(
+    client, db_session, monkeypatch
+):
+    from app.routes import payroll_jurisdiction, tax_forms
+    from app.services import payroll_jurisdiction_service
+
+    server_today = date(2025, 10, 23)
+
+    class FrozenDate(date):
+        @classmethod
+        def today(cls):
+            return server_today
+
+    monkeypatch.setattr(payroll_jurisdiction, "date", FrozenDate)
+    monkeypatch.setattr(payroll_jurisdiction_service, "date", FrozenDate)
+
+    employee = _employee(client)
+    _run, stub = _seed_run(
+        db_session,
+        employee["id"],
+        period_start=date(2025, 12, 1),
+        period_end=date(2025, 12, 14),
+        pay_date=date(2025, 12, 15),
+    )
+    activation = client.post(
+        "/api/settings/payroll-jurisdiction",
+        json={"country_code": "CA", "effective_from": "2026-01-01"},
+    )
+    assert activation.status_code == 201, activation.text
+    assert activation.json()["effective_from"] == "2026-01-01"
+    monkeypatch.setattr(payroll_jurisdiction_service, "date", date)
+
+    json_responses = {
+        "941": client.get("/api/tax-forms/941?year=2025&quarter=4"),
+        "940": client.get("/api/tax-forms/940?year=2025"),
+        "all_w2": client.get("/api/tax-forms/w2?year=2025"),
+        "employee_w2": client.get(
+            f"/api/tax-forms/w2/{employee['id']}?year=2025"
+        ),
+        "sui": client.get(
+            "/api/tax-forms/sui?year=2025&quarter=4&state=WA"
+        ),
+        "liability": client.get(
+            "/api/tax-forms/liability?year=2025&quarter=4"
+        ),
+    }
+    for name, response in json_responses.items():
+        assert response.status_code == 200, f"{name}: {response.text}"
+
+    form_941 = json_responses["941"].json()
+    assert form_941["num_stubs"] == 1
+    assert form_941["total_wages"] == 1000
+    assert form_941["federal_income_tax_withheld"] == 100
+
+    form_940 = json_responses["940"].json()
+    assert form_940["num_stubs"] == 1
+    assert form_940["total_payments"] == 1000
+    assert form_940["total_futa_tax"] == 6
+
+    all_w2 = json_responses["all_w2"].json()
+    assert all_w2["w3"]["num_w2"] == 1
+    assert all_w2["w2"][0]["gross_pay"] == 1000
+    assert all_w2["w2"][0]["employee"]["name"] == "Taylor Taxform"
+
+    employee_w2 = json_responses["employee_w2"].json()
+    assert employee_w2["num_stubs"] == 1
+    assert employee_w2["gross_pay"] == 1000
+    assert employee_w2["box2_federal_tax_withheld"] == 100
+
+    sui = json_responses["sui"].json()
+    assert sui["num_employees"] == 1
+    assert sui["total_wages"] == 1000
+    assert sui["employees"][0]["suta_tax"] == 5
+
+    liability = json_responses["liability"].json()
+    assert liability["num_stubs"] == 1
+    assert liability["total_due"] > 0
+    assert liability["liabilities"][0]["amount"] > 0
+
+    renderers = {
+        "941": (tax_forms.form_941, "generate_941_pdf", "total_wages"),
+        "940": (tax_forms.form_940, "generate_940_pdf", "total_payments"),
+        "w2": (tax_forms.w2_w3, "generate_w2_pdf", "gross_pay"),
+    }
+    renderer_spies = {}
+    for key, (module, name, data_key) in renderers.items():
+        spy = Mock(wraps=getattr(module, name))
+        monkeypatch.setattr(module, name, spy)
+        renderer_spies[key] = (spy, data_key)
+
+    pdf_responses = {
+        "941": client.get("/api/tax-forms/941/pdf?year=2025&quarter=4"),
+        "940": client.get("/api/tax-forms/940/pdf?year=2025"),
+        "w2": client.get(
+            f"/api/tax-forms/w2/{employee['id']}/pdf?year=2025"
+        ),
+    }
+    for name, response in pdf_responses.items():
+        assert response.status_code == 200, f"{name}: {response.text}"
+        assert response.headers["content-type"] == "application/pdf"
+        assert response.content.startswith(b"%PDF-")
+        assert len(response.content) > 1024
+
+        spy, data_key = renderer_spies[name]
+        spy.assert_called_once()
+        call = spy.call_args
+        assert [contributor.id for contributor in call.kwargs["stubs"]] == [
+            stub.id
+        ]
+        assert call.kwargs["data"][data_key] == Decimal("1000.00")
+
+
 def test_contributor_full_period_crossing_activation_blocks_pre_activation_tax_year(
     client, db_session, monkeypatch
 ):
