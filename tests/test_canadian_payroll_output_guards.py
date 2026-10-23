@@ -275,6 +275,88 @@ def test_paystub_ytd_excludes_later_canadian_period_and_keeps_safe_pdf(
     assert future_stub.id not in {stub.id for stub in rendered_stubs}
 
 
+def test_paystub_ytd_excludes_historical_void_run(client, db_session, monkeypatch):
+    from app.routes.payroll import exports, ytd as payroll_ytd
+    from app.services import paystub_pdf
+
+    employee = _employee(client)
+    year_start = date(date.today().year, 1, 1)
+    earlier_pay_date = year_start + timedelta(days=4)
+    void_pay_date = year_start + timedelta(days=11)
+    target_pay_date = year_start + timedelta(days=18)
+    effective_from = max(
+        date.today() + timedelta(days=30), target_pay_date + timedelta(days=1)
+    )
+
+    _earlier_run, earlier_stub = _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=year_start,
+        period_end=earlier_pay_date - timedelta(days=1),
+        pay_date=earlier_pay_date,
+        gross=500,
+        federal=50,
+    )
+    void_run, void_stub = _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=earlier_pay_date + timedelta(days=1),
+        period_end=void_pay_date - timedelta(days=1),
+        pay_date=void_pay_date,
+        gross=9000,
+        federal=900,
+    )
+    void_run.status = PayRunStatus.VOID
+    db_session.commit()
+    target_run, target_stub = _seed_legacy_processed_run(
+        db_session,
+        employee["id"],
+        period_start=void_pay_date + timedelta(days=1),
+        period_end=target_pay_date - timedelta(days=1),
+        pay_date=target_pay_date,
+        gross=1000,
+        federal=100,
+    )
+    configured = _jurisdiction(client, effective_from)
+    assert configured.status_code == 201, configured.text
+
+    actual_ytd_stubs = payroll_ytd._ytd_stubs
+    queried_stubs = []
+
+    def observe_ytd_stubs(*args, **kwargs):
+        stubs = actual_ytd_stubs(*args, **kwargs)
+        queried_stubs.append(stubs)
+        return stubs
+
+    pdf_spy = Mock(return_value=b"safe PDF")
+    ytd_spy = Mock(wraps=exports.employee_ytd)
+    monkeypatch.setattr(payroll_ytd, "_ytd_stubs", observe_ytd_stubs)
+    monkeypatch.setattr(paystub_pdf, "generate_paystub_pdf", pdf_spy)
+    monkeypatch.setattr(exports, "employee_ytd", ytd_spy)
+
+    response = client.get(
+        f"/api/payroll/{target_run.id}/paystub/{target_stub.id}"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"safe PDF"
+    ytd_spy.assert_called_once()
+    assert len(queried_stubs) == 1
+    assert {stub.id for stub in queried_stubs[0]} == {
+        earlier_stub.id,
+        target_stub.id,
+    }
+    rendered_ytd = pdf_spy.call_args.args[4]
+    rendered_stubs = pdf_spy.call_args.kwargs["ytd_stubs"]
+    assert rendered_ytd["federal"] == "150.00"
+    assert rendered_ytd["gross"] == "1500.00"
+    assert {stub.id for stub in rendered_stubs} == {
+        earlier_stub.id,
+        target_stub.id,
+    }
+    assert void_stub.id not in {stub.id for stub in rendered_stubs}
+
+
 def test_nacha_blocks_legacy_processed_canadian_run_before_generation(
     client, db_session, monkeypatch
 ):
