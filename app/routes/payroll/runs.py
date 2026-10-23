@@ -818,7 +818,18 @@ def gross_up_paycheck(data: GrossUpRequest, db: Session = Depends(get_db)):
     if data.target_net <= 0:
         raise HTTPException(status_code=400, detail="target_net must be positive")
 
-    year = date.today().year
+    today = date.today()
+    try:
+        jurisdiction = resolve_company_payroll_jurisdiction(db, today)
+    except PayrollJurisdictionAmbiguous as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if jurisdiction is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="Canadian gross-up calculation support is not enabled yet.",
+        )
+
+    year = today.year
     ytd = employee_ytd(db, emp.id, year)
     ytd_suppl = (
         _ytd_supplemental(db, emp.id, year) if data.supplemental else Decimal("0")
