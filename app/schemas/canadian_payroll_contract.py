@@ -237,16 +237,25 @@ class EmployerConfigurationSnapshot(ContractModel):
 
 
 class EmployerRequirementApplicability(ContractModel):
-    """Reviewed evidence for one levy or workers' compensation requirement."""
+    """Date-bounded reviewed evidence for one levy or workers' compensation requirement."""
 
     requirement: EmployerRequirement
     decision: Literal["applicable", "reviewed_not_applicable"]
-    review_attestation_reference: NonBlankReference
-    reviewer_qualification_reference: NonBlankReference
+    review_attestation_reference: NonBlankReference | None = None
+    reviewer_qualification_reference: NonBlankReference | None = None
+    effective_from: date | None = None
+    effective_to: date | None = None
+    effective_date_basis: EffectiveDateBasis | None = None
     employer_configuration_snapshot: EmployerConfigurationSnapshot | None = None
 
     @model_validator(mode="after")
     def decision_has_required_evidence(self):
+        if (
+            self.effective_from is not None
+            and self.effective_to is not None
+            and self.effective_to < self.effective_from
+        ):
+            raise ValueError("employer applicability decision end must not precede its start")
         if self.decision == "applicable" and self.employer_configuration_snapshot is None:
             raise ValueError("applicable employer requirement needs reviewed employer configuration")
         if (
@@ -667,6 +676,24 @@ class CanadianPayrollEvaluation(ContractModel):
         }
         for requirement, outputs in output_groups.items():
             decision = decisions[requirement]
+            if (
+                decision.review_attestation_reference is None
+                or decision.reviewer_qualification_reference is None
+                or decision.effective_from is None
+                or decision.effective_to is None
+                or decision.effective_date_basis is None
+            ):
+                raise ValueError(
+                    "employer applicability decision requires qualified review and "
+                    "effective-date evidence"
+                )
+            _require_effective_window_coverage(
+                decision.effective_from,
+                decision.effective_to,
+                decision.effective_date_basis,
+                request.pay_period,
+                "employer applicability decision",
+            )
             if decision.decision == "reviewed_not_applicable":
                 if outputs:
                     raise ValueError(

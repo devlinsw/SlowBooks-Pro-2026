@@ -79,6 +79,9 @@ def make_employer_configuration(
                 decision=levy,
                 review_attestation_reference="structural-levy-review",
                 reviewer_qualification_reference="structural-levy-qualification",
+                effective_from=date(2026, 5, 1),
+                effective_to=date(2026, 5, 7),
+                effective_date_basis="full_pay_period",
                 employer_configuration_snapshot=(
                     _employer_configuration_snapshot("employer_levy")
                     if levy == "applicable"
@@ -90,6 +93,9 @@ def make_employer_configuration(
                 decision=wcb,
                 review_attestation_reference="structural-wcb-review",
                 reviewer_qualification_reference="structural-wcb-qualification",
+                effective_from=date(2026, 5, 1),
+                effective_to=date(2026, 5, 7),
+                effective_date_basis="full_pay_period",
                 employer_configuration_snapshot=(
                     _employer_configuration_snapshot("workers_compensation")
                     if wcb == "applicable"
@@ -513,7 +519,7 @@ def test_calculated_result_does_not_expose_block_reasons():
     assert "block_reasons" not in CalculatedPayrollResult.model_fields
 
 
-def test_employer_requirement_decisions_are_explicit_and_reviewed():
+def test_employer_requirement_decisions_require_configuration_for_applicable_status():
     applicability = _new_contract_api("EmployerRequirementApplicability")
     configuration = _new_contract_api("EmployerConfigurationReferences")
 
@@ -553,12 +559,12 @@ def test_employer_requirement_decisions_are_explicit_and_reviewed():
             review_attestation_reference="structural-review",
             reviewer_qualification_reference="structural-qualification",
         )
-    with pytest.raises(ValidationError):
-        applicability(
-            requirement="workers_compensation",
-            decision="reviewed_not_applicable",
-            reviewer_qualification_reference="structural-qualification",
-        )
+    incomplete_decision = applicability(
+        requirement="workers_compensation",
+        decision="reviewed_not_applicable",
+    )
+    assert incomplete_decision.review_attestation_reference is None
+    assert incomplete_decision.reviewer_qualification_reference is None
     with pytest.raises(ValidationError):
         configuration(applicability_decisions=())
     with pytest.raises(ValidationError):
@@ -1197,6 +1203,9 @@ def test_employer_configuration_snapshot_covers_its_declared_date_basis():
                     decision="applicable",
                     review_attestation_reference="structural-levy-review",
                     reviewer_qualification_reference="structural-levy-qualification",
+                    effective_from=date(2026, 5, 12),
+                    effective_to=date(2026, 5, 12),
+                    effective_date_basis="pay_date",
                     employer_configuration_snapshot=snapshot,
                 ),
                 contract.EmployerRequirementApplicability(
@@ -1204,6 +1213,9 @@ def test_employer_configuration_snapshot_covers_its_declared_date_basis():
                     decision="reviewed_not_applicable",
                     review_attestation_reference="structural-wcb-review",
                     reviewer_qualification_reference="structural-wcb-qualification",
+                    effective_from=date(2026, 5, 1),
+                    effective_to=date(2026, 5, 7),
+                    effective_date_basis="full_pay_period",
                 ),
             )
         )
@@ -1324,6 +1336,9 @@ def test_unspecified_employer_configuration_date_basis_stays_blocked():
                 decision="applicable",
                 review_attestation_reference="structural-levy-review",
                 reviewer_qualification_reference="structural-levy-qualification",
+                effective_from=date(2026, 5, 1),
+                effective_to=date(2026, 5, 7),
+                effective_date_basis="full_pay_period",
                 employer_configuration_snapshot=snapshot,
             ),
             contract.EmployerRequirementApplicability(
@@ -1331,6 +1346,9 @@ def test_unspecified_employer_configuration_date_basis_stays_blocked():
                 decision="reviewed_not_applicable",
                 review_attestation_reference="structural-wcb-review",
                 reviewer_qualification_reference="structural-wcb-qualification",
+                effective_from=date(2026, 5, 1),
+                effective_to=date(2026, 5, 7),
+                effective_date_basis="full_pay_period",
             ),
         )
     )
@@ -1386,3 +1404,127 @@ def test_unspecified_employer_configuration_date_basis_stays_blocked():
 def test_effective_date_metadata_cannot_be_partially_specified(snapshot_factory):
     with pytest.raises(ValidationError, match="must be supplied together"):
         snapshot_factory()
+
+
+def _applicability_test_request(
+    *,
+    effective_from=None,
+    effective_to=None,
+    effective_date_basis=None,
+    reviewed=True,
+):
+    decisions = []
+    for requirement in ("employer_levy", "workers_compensation"):
+        values = {
+            "requirement": requirement,
+            "decision": "reviewed_not_applicable",
+        }
+        if reviewed:
+            values.update(
+                review_attestation_reference=f"structural-{requirement}-review",
+                reviewer_qualification_reference=f"structural-{requirement}-qualification",
+            )
+        if any(
+            value is not None
+            for value in (effective_from, effective_to, effective_date_basis)
+        ):
+            values.update(
+                effective_from=effective_from,
+                effective_to=effective_to,
+                effective_date_basis=effective_date_basis,
+            )
+        decisions.append(contract.EmployerRequirementApplicability(**values))
+    references = EmployerConfigurationReferences(applicability_decisions=tuple(decisions))
+    return make_request(employer_configuration_references=references)
+
+
+@pytest.mark.parametrize(
+    "effective_from,effective_to,effective_date_basis",
+    [
+        (date(2026, 5, 1), date(2026, 5, 7), "full_pay_period"),
+        (date(2026, 5, 12), date(2026, 5, 12), "pay_date"),
+    ],
+)
+def test_calculated_result_accepts_current_reviewed_not_applicable_decisions(
+    effective_from, effective_to, effective_date_basis
+):
+    request = _applicability_test_request(
+        effective_from=effective_from,
+        effective_to=effective_to,
+        effective_date_basis=effective_date_basis,
+    )
+    result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+    )
+
+    assert contract.CanadianPayrollEvaluation(request=request, result=result)
+
+
+def test_calculated_result_rejects_unbounded_not_applicable_decisions():
+    request = _applicability_test_request()
+    result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+    )
+
+    with pytest.raises(ValidationError, match="applicability decision.*effective-date evidence"):
+        contract.CanadianPayrollEvaluation(request=request, result=result)
+
+
+@pytest.mark.parametrize(
+    "effective_from,effective_to,effective_date_basis",
+    [
+        (date(2026, 5, 1), date(2026, 5, 6), "full_pay_period"),
+        (date(2026, 5, 11), date(2026, 5, 11), "pay_date"),
+    ],
+)
+def test_calculated_result_rejects_stale_not_applicable_decision_windows(
+    effective_from, effective_to, effective_date_basis
+):
+    request = _applicability_test_request(
+        effective_from=effective_from,
+        effective_to=effective_to,
+        effective_date_basis=effective_date_basis,
+    )
+    result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+    )
+
+    with pytest.raises(ValidationError, match="applicability decision.*must cover"):
+        contract.CanadianPayrollEvaluation(request=request, result=result)
+
+
+def test_incomplete_applicability_decision_is_usable_only_for_blocked_result():
+    request = _applicability_test_request(reviewed=False)
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference=request.request_reference,
+        reason_codes=(PayrollBlockReasonCode.MISSING_REVIEWED_COMPONENT,),
+    )
+    assert contract.CanadianPayrollEvaluation(request=request, result=blocked)
+
+    result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+    )
+    with pytest.raises(ValidationError, match="applicability decision.*effective-date evidence"):
+        contract.CanadianPayrollEvaluation(request=request, result=result)
+
+
+def test_applicability_decision_effective_window_must_be_ordered():
+    with pytest.raises(ValidationError, match="applicability decision end must not precede its start"):
+        contract.EmployerRequirementApplicability(
+            requirement="employer_levy",
+            decision="reviewed_not_applicable",
+            review_attestation_reference="structural-review",
+            reviewer_qualification_reference="structural-qualification",
+            effective_from=date(2026, 5, 13),
+            effective_to=date(2026, 5, 12),
+            effective_date_basis="pay_date",
+        )
