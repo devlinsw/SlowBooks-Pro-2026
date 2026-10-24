@@ -780,6 +780,73 @@ def test_calculated_result_rejects_unreferenced_rule_snapshot_with_valid_pay_dat
         )
 
 
+def test_calculated_result_accepts_rule_snapshot_referenced_only_by_basis_provenance():
+    request = make_request()
+    primary_rule_snapshot = _snapshot_test_rule()
+    basis_source_snapshot = _snapshot_test_source(
+        source_reference="basis-only-source",
+        snapshot_reference="basis-only-source-snapshot",
+        version_reference="basis-only-source-version",
+        content_digest="basis-only-source-digest",
+        applicability_review_attestation_reference="basis-only-source-date-review",
+        applicability_reviewer_qualification_reference="basis-only-source-date-qualification",
+    )
+    basis_rule_snapshot = _snapshot_test_rule(
+        rule_bundle_reference="basis-only-rule-bundle",
+        snapshot_reference="basis-only-rule-snapshot",
+        version_reference="basis-only-rule-version",
+        content_digest="basis-only-rule-digest",
+        effective_pay_date=request.pay_period.pay_date,
+        qualified_review_attestation_reference="basis-only-rule-review",
+        reviewer_qualification_reference="basis-only-rule-qualification",
+        source_snapshots=(basis_source_snapshot,),
+    )
+    basis_provenance = _snapshot_test_provenance(
+        component_reference="basis-only-component",
+        rule_bundle_reference=basis_rule_snapshot.rule_bundle_reference,
+        rule_snapshot_reference=basis_rule_snapshot.snapshot_reference,
+        rule_version_reference=basis_rule_snapshot.version_reference,
+        rule_content_digest=basis_rule_snapshot.content_digest,
+        rule_reference="basis-only-rule",
+        source_snapshots=(basis_source_snapshot,),
+        qualified_review_attestation_reference=(
+            basis_rule_snapshot.qualified_review_attestation_reference
+        ),
+        reviewer_qualification_reference=(
+            basis_rule_snapshot.reviewer_qualification_reference
+        ),
+    )
+    basis_earning = EarningOutput.model_validate(
+        {
+            "earning_code": "structural-earning",
+            "amount": "0",
+            "bases": (
+                {
+                    "basis_code": "structural-basis",
+                    "amount": "0",
+                    "provenance": basis_provenance,
+                },
+            ),
+            "provenance": _snapshot_test_provenance(),
+        }
+    )
+    result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+        earnings=(basis_earning,),
+        rule_snapshots=(primary_rule_snapshot, basis_rule_snapshot),
+    )
+
+    assert result.earnings[0].provenance.rule_snapshot_reference == (
+        primary_rule_snapshot.snapshot_reference
+    )
+    assert result.earnings[0].bases[0].provenance.rule_snapshot_reference == (
+        basis_rule_snapshot.snapshot_reference
+    )
+    assert contract.CanadianPayrollEvaluation(request=request, result=result)
+
+
 def test_component_provenance_binds_exact_rule_and_source_snapshots():
     _new_contract_api("SourceSnapshot")
     provenance = _snapshot_test_provenance()
