@@ -23,6 +23,45 @@ def _classify(client):
     )
 
 
+def _track_route_lock_and_rollback(monkeypatch):
+    from app.routes import time_entries
+    from app.services.payroll_jurisdiction_service import (
+        lock_company_payroll_jurisdiction,
+    )
+
+    observed = {}
+
+    def capture_route_session(db):
+        lock_company_payroll_jurisdiction(db)
+        observed["db"] = db
+        original_rollback = db.rollback
+
+        def record_rollback():
+            observed.setdefault("rollback_transactions", []).append(
+                db.get_transaction()
+            )
+            original_rollback()
+            observed["transaction_after_rollback"] = db.get_transaction()
+
+        db.rollback = record_rollback
+
+    monkeypatch.setattr(
+        time_entries,
+        "lock_company_payroll_jurisdiction",
+        capture_route_session,
+        raising=False,
+    )
+    return observed
+
+
+def _assert_route_rollback_completed(observed):
+    assert observed["db"] is not None
+    assert len(observed["rollback_transactions"]) == 1
+    assert observed["rollback_transactions"][0] is not None
+    assert observed["transaction_after_rollback"] is None
+    assert observed["db"].get_transaction() is None
+
+
 def _company_history(db_session, effective_from, effective_to=None):
     from app.models.payroll_jurisdiction import PayrollJurisdiction
 
@@ -150,6 +189,32 @@ def test_employee_province_history_alone_blocks_date_free_classifier(
     classifier_spy.assert_not_called()
 
 
+def test_future_only_employee_province_history_blocks_date_free_classifier(
+    client, db_session, monkeypatch
+):
+    from app.models.employee_payroll_jurisdiction import EmployeePayrollJurisdiction
+    from app.models.payroll_jurisdiction import PayrollJurisdiction
+
+    employee = _employee(client)
+    assert db_session.query(PayrollJurisdiction).count() == 0
+    db_session.add(
+        EmployeePayrollJurisdiction(
+            employee_id=employee["id"],
+            country_code="CA",
+            province_code="BC",
+            regulatory_scope="provincially_regulated",
+            effective_from=date.today() + timedelta(days=5),
+        )
+    )
+    db_session.commit()
+    _, classifier_spy, _ = _classifier_spy(monkeypatch)
+
+    response = _classify(client)
+
+    assert response.status_code == 422, response.text
+    classifier_spy.assert_not_called()
+
+
 def test_ambiguous_company_history_returns_conflict_before_classification(
     client, db_session, monkeypatch
 ):
@@ -203,6 +268,47 @@ def test_expected_jurisdiction_failures_return_generic_503_without_classificatio
         "Payroll jurisdiction status is unavailable; overtime classification is blocked."
     )
     assert "secret" not in response.text
+    classifier_spy.assert_not_called()
+
+
+def test_blocked_classifier_rejection_rolls_back_route_transaction(
+    client, db_session, monkeypatch
+):
+    _company_history(db_session, date.today())
+    _, classifier_spy, _ = _classifier_spy(monkeypatch)
+    observed = _track_route_lock_and_rollback(monkeypatch)
+
+    response = _classify(client)
+
+    assert response.status_code == 422, response.text
+    _assert_route_rollback_completed(observed)
+    classifier_spy.assert_not_called()
+
+
+def test_history_error_response_rolls_back_route_transaction(client, monkeypatch):
+    from app.routes import time_entries
+    from sqlalchemy.exc import SQLAlchemyError
+
+    _, classifier_spy, _ = _classifier_spy(monkeypatch)
+    observed = _track_route_lock_and_rollback(monkeypatch)
+
+    def fail_history(_db):
+        raise SQLAlchemyError("secret history details")
+
+    monkeypatch.setattr(
+        time_entries,
+        "list_company_payroll_jurisdictions",
+        fail_history,
+        raising=False,
+    )
+
+    response = _classify(client)
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == (
+        "Payroll jurisdiction status is unavailable; overtime classification is blocked."
+    )
+    _assert_route_rollback_completed(observed)
     classifier_spy.assert_not_called()
 
 
