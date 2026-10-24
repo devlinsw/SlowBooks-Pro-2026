@@ -237,10 +237,10 @@ class EmployerConfigurationSnapshot(ContractModel):
 
 
 class EmployerRequirementApplicability(ContractModel):
-    """Date-bounded reviewed evidence for one levy or workers' compensation requirement."""
+    """Reviewed or explicitly unreviewed state for one employer requirement."""
 
     requirement: EmployerRequirement
-    decision: Literal["applicable", "reviewed_not_applicable"]
+    decision: Literal["applicable", "reviewed_not_applicable", "unreviewed"]
     review_attestation_reference: NonBlankReference | None = None
     reviewer_qualification_reference: NonBlankReference | None = None
     effective_from: date | None = None
@@ -250,24 +250,44 @@ class EmployerRequirementApplicability(ContractModel):
 
     @model_validator(mode="after")
     def decision_has_required_evidence(self):
+        review_evidence = (
+            self.review_attestation_reference,
+            self.reviewer_qualification_reference,
+            self.effective_from,
+            self.effective_to,
+            self.effective_date_basis,
+        )
         if (
             self.effective_from is not None
             and self.effective_to is not None
             and self.effective_to < self.effective_from
         ):
             raise ValueError("employer applicability decision end must not precede its start")
-        if self.decision == "applicable" and self.employer_configuration_snapshot is None:
-            raise ValueError("applicable employer requirement needs reviewed employer configuration")
+        if self.decision != "unreviewed" and any(value is None for value in review_evidence):
+            raise ValueError(
+                "reviewed employer applicability decision requires qualified review and "
+                "effective-date evidence"
+            )
+        if self.decision == "applicable":
+            if self.employer_configuration_snapshot is None:
+                raise ValueError(
+                    "applicable employer requirement needs reviewed employer configuration"
+                )
         if (
             self.decision == "reviewed_not_applicable"
             and self.employer_configuration_snapshot is not None
         ):
             raise ValueError("reviewed not-applicable decision must not carry employer configuration")
+        if self.decision == "unreviewed" and self.employer_configuration_snapshot is not None:
+            raise ValueError(
+                "unreviewed employer applicability decision must not carry employer "
+                "configuration snapshot"
+            )
         return self
 
 
 class EmployerConfigurationReferences(ContractModel):
-    """Explicit reviewed applicability decisions for every represented requirement."""
+    """Explicit applicability decisions and review states for represented requirements."""
 
     applicability_decisions: tuple[EmployerRequirementApplicability, ...] = Field(
         min_length=2
@@ -631,8 +651,17 @@ class CanadianPayrollEvaluation(ContractModel):
             required_blockers.add(PayrollBlockReasonCode.UNSUPPORTED_JURISDICTION)
         if len(provinces) != 1:
             required_blockers.add(PayrollBlockReasonCode.CROSS_PROVINCE_PERIOD)
+        if any(
+            decision.decision == "unreviewed"
+            for decision in request.employer_configuration_references.applicability_decisions
+        ):
+            required_blockers.add(PayrollBlockReasonCode.MISSING_REVIEWED_COMPONENT)
 
         if result.status == "calculated":
+            if PayrollBlockReasonCode.MISSING_REVIEWED_COMPONENT in required_blockers:
+                raise ValueError(
+                    "unreviewed employer applicability decision must be blocked"
+                )
             if PayrollBlockReasonCode.FEDERALLY_REGULATED_EMPLOYMENT in required_blockers:
                 raise ValueError("federally regulated employment must be blocked")
             if PayrollBlockReasonCode.UNSUPPORTED_JURISDICTION in required_blockers:
@@ -661,6 +690,11 @@ class CanadianPayrollEvaluation(ContractModel):
                 raise ValueError("unsupported request context must produce a blocked result")
             missing = required_blockers.difference(result.reason_codes)
             if missing:
+                if PayrollBlockReasonCode.MISSING_REVIEWED_COMPONENT in missing:
+                    raise ValueError(
+                        "unreviewed employer applicability decision requires "
+                        "missing_reviewed_component block"
+                    )
                 raise ValueError("blocked result must include the request's required block reason")
         return self
 

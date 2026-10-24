@@ -528,6 +528,9 @@ def test_employer_requirement_decisions_require_configuration_for_applicable_sta
         decision="applicable",
         review_attestation_reference="structural-levy-review",
         reviewer_qualification_reference="structural-levy-qualification",
+        effective_from=date(2026, 5, 1),
+        effective_to=date(2026, 5, 7),
+        effective_date_basis="full_pay_period",
         employer_configuration_snapshot=contract.EmployerConfigurationSnapshot(
             employer_configuration_reference="structural-employer-config",
             snapshot_reference="structural-employer-config-snapshot",
@@ -547,6 +550,9 @@ def test_employer_requirement_decisions_require_configuration_for_applicable_sta
         decision="reviewed_not_applicable",
         review_attestation_reference="structural-wcb-review",
         reviewer_qualification_reference="structural-wcb-qualification",
+        effective_from=date(2026, 5, 1),
+        effective_to=date(2026, 5, 7),
+        effective_date_basis="full_pay_period",
     )
     assert configuration(
         applicability_decisions=(levy_applicable, wcb_reviewed_not_applicable)
@@ -559,12 +565,17 @@ def test_employer_requirement_decisions_require_configuration_for_applicable_sta
             review_attestation_reference="structural-review",
             reviewer_qualification_reference="structural-qualification",
         )
-    incomplete_decision = applicability(
+    with pytest.raises(ValidationError, match="reviewed employer applicability decision requires"):
+        applicability(
+            requirement="workers_compensation",
+            decision="reviewed_not_applicable",
+        )
+    unreviewed_decision = applicability(
         requirement="workers_compensation",
-        decision="reviewed_not_applicable",
+        decision="unreviewed",
     )
-    assert incomplete_decision.review_attestation_reference is None
-    assert incomplete_decision.reviewer_qualification_reference is None
+    assert unreviewed_decision.review_attestation_reference is None
+    assert unreviewed_decision.reviewer_qualification_reference is None
     with pytest.raises(ValidationError):
         configuration(applicability_decisions=())
     with pytest.raises(ValidationError):
@@ -1417,7 +1428,7 @@ def _applicability_test_request(
     for requirement in ("employer_levy", "workers_compensation"):
         values = {
             "requirement": requirement,
-            "decision": "reviewed_not_applicable",
+            "decision": "reviewed_not_applicable" if reviewed else "unreviewed",
         }
         if reviewed:
             values.update(
@@ -1436,6 +1447,153 @@ def _applicability_test_request(
         decisions.append(contract.EmployerRequirementApplicability(**values))
     references = EmployerConfigurationReferences(applicability_decisions=tuple(decisions))
     return make_request(employer_configuration_references=references)
+
+
+def _unreviewed_applicability_test_request():
+    decisions = tuple(
+        contract.EmployerRequirementApplicability(
+            requirement=requirement,
+            decision="unreviewed",
+            review_attestation_reference=f"pending-{requirement}-review",
+        )
+        for requirement in ("employer_levy", "workers_compensation")
+    )
+    return make_request(
+        employer_configuration_references=EmployerConfigurationReferences(
+            applicability_decisions=decisions
+        )
+    )
+
+
+def _raw_request_with_decisions(decisions):
+    request = make_request().model_dump(mode="python")
+    request["employer_configuration_references"] = {
+        "applicability_decisions": decisions,
+    }
+    return request
+
+
+def test_incomplete_reviewed_not_applicable_is_rejected_at_public_envelope():
+    request = _raw_request_with_decisions(
+        (
+            {"requirement": "employer_levy", "decision": "reviewed_not_applicable"},
+            {
+                "requirement": "workers_compensation",
+                "decision": "reviewed_not_applicable",
+            },
+        )
+    )
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference=request["request_reference"],
+        reason_codes=(PayrollBlockReasonCode.OTHER,),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="reviewed employer applicability decision requires qualified review and effective-date evidence",
+    ):
+        contract.CanadianPayrollEvaluation(request=request, result=blocked)
+
+
+def test_unreviewed_applicability_accepts_explicit_missing_review_block():
+    request = _unreviewed_applicability_test_request()
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference=request.request_reference,
+        reason_codes=(PayrollBlockReasonCode.MISSING_REVIEWED_COMPONENT,),
+    )
+
+    assert contract.CanadianPayrollEvaluation(request=request, result=blocked)
+
+
+def test_unreviewed_applicability_rejects_blocked_result_without_missing_review_reason():
+    request = _unreviewed_applicability_test_request()
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference=request.request_reference,
+        reason_codes=(PayrollBlockReasonCode.OTHER,),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="unreviewed employer applicability decision requires missing_reviewed_component block",
+    ):
+        contract.CanadianPayrollEvaluation(request=request, result=blocked)
+
+
+def test_unreviewed_applicability_rejects_calculated_result():
+    request = _unreviewed_applicability_test_request()
+    calculated = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="unreviewed employer applicability decision must be blocked",
+    ):
+        contract.CanadianPayrollEvaluation(request=request, result=calculated)
+
+
+def test_incomplete_applicable_decision_is_rejected_at_public_envelope():
+    reviewed_wcb = contract.EmployerRequirementApplicability(
+        requirement="workers_compensation",
+        decision="reviewed_not_applicable",
+        review_attestation_reference="structural-wcb-review",
+        reviewer_qualification_reference="structural-wcb-qualification",
+        effective_from=date(2026, 5, 1),
+        effective_to=date(2026, 5, 7),
+        effective_date_basis="full_pay_period",
+    ).model_dump(mode="python")
+    incomplete_levy = {
+        "requirement": "employer_levy",
+        "decision": "applicable",
+        "employer_configuration_snapshot": _employer_configuration_snapshot(
+            "employer_levy"
+        ).model_dump(mode="python"),
+    }
+    request = _raw_request_with_decisions((incomplete_levy, reviewed_wcb))
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference=request["request_reference"],
+        reason_codes=(PayrollBlockReasonCode.OTHER,),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="reviewed employer applicability decision requires qualified review and effective-date evidence",
+    ):
+        contract.CanadianPayrollEvaluation(request=request, result=blocked)
+
+
+def test_unreviewed_applicability_cannot_carry_reviewed_configuration_snapshot():
+    decisions = (
+        {
+            "requirement": "employer_levy",
+            "decision": "unreviewed",
+            "employer_configuration_snapshot": _employer_configuration_snapshot(
+                "employer_levy"
+            ).model_dump(mode="python"),
+        },
+        {
+            "requirement": "workers_compensation",
+            "decision": "unreviewed",
+        },
+    )
+    request = _raw_request_with_decisions(decisions)
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference=request["request_reference"],
+        reason_codes=(PayrollBlockReasonCode.MISSING_REVIEWED_COMPONENT,),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="unreviewed employer applicability decision must not carry employer configuration snapshot",
+    ):
+        contract.CanadianPayrollEvaluation(request=request, result=blocked)
 
 
 @pytest.mark.parametrize(
@@ -1462,16 +1620,12 @@ def test_calculated_result_accepts_current_reviewed_not_applicable_decisions(
     assert contract.CanadianPayrollEvaluation(request=request, result=result)
 
 
-def test_calculated_result_rejects_unbounded_not_applicable_decisions():
-    request = _applicability_test_request()
-    result = _structural_calculated_result(
-        request_reference=request.request_reference,
-        employee_reference=request.employee_reference,
-        pay_period=request.pay_period,
-    )
-
-    with pytest.raises(ValidationError, match="applicability decision.*effective-date evidence"):
-        contract.CanadianPayrollEvaluation(request=request, result=result)
+def test_unbounded_not_applicable_decision_is_not_representable():
+    with pytest.raises(
+        ValidationError,
+        match="reviewed employer applicability decision requires qualified review and effective-date evidence",
+    ):
+        _applicability_test_request()
 
 
 @pytest.mark.parametrize(
@@ -1513,7 +1667,10 @@ def test_incomplete_applicability_decision_is_usable_only_for_blocked_result():
         employee_reference=request.employee_reference,
         pay_period=request.pay_period,
     )
-    with pytest.raises(ValidationError, match="applicability decision.*effective-date evidence"):
+    with pytest.raises(
+        ValidationError,
+        match="unreviewed employer applicability decision must be blocked",
+    ):
         contract.CanadianPayrollEvaluation(request=request, result=result)
 
 
