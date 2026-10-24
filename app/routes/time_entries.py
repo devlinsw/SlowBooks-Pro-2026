@@ -8,9 +8,11 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.schemas.common import StrictModel
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
+from app.models.employee_payroll_jurisdiction import EmployeePayrollJurisdiction
 from app.models.payroll import Employee
 from app.models.time_entries import TimeEntry, TimeEntryStatus
 from app.schemas.time_entries import (
@@ -20,6 +22,12 @@ from app.schemas.time_entries import (
     TimeEntryApprove,
 )
 from app.services.overtime import classify_period
+from app.services.payroll_jurisdiction_service import (
+    PayrollJurisdictionAmbiguous,
+    PayrollJurisdictionLockUnsupported,
+    list_company_payroll_jurisdictions,
+    lock_company_payroll_jurisdiction,
+)
 from app.services.safe_errors import safe_message
 
 router = APIRouter(prefix="/api/time-entries", tags=["time-entries"])
@@ -235,8 +243,34 @@ class ClassifyRequest(StrictModel):
 
 
 @router.post("/classify")
-def classify_hours(data: ClassifyRequest):
-    """Run the overtime engine over raw daily hours (FLSA + state overrides)."""
+def classify_hours(data: ClassifyRequest, db: Session = Depends(get_db)):
+    """Classify hours only when no Canadian payroll jurisdiction is configured."""
+    try:
+        lock_company_payroll_jurisdiction(db)
+        company_history = list_company_payroll_jurisdictions(db)
+        employee_history_exists = (
+            db.query(EmployeePayrollJurisdiction.id).first() is not None
+        )
+    except PayrollJurisdictionAmbiguous as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Payroll jurisdiction history is ambiguous; overtime classification is blocked.",
+        ) from exc
+    except (PayrollJurisdictionLockUnsupported, SQLAlchemyError) as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Payroll jurisdiction status is unavailable; overtime classification is blocked.",
+        ) from exc
+
+    if company_history or employee_history_exists:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail="Canadian overtime classification support is not enabled yet.",
+        )
+
     weeks = [[Decimal(str(h)) for h in week] for week in data.weeks]
     result = classify_period(weeks, data.state)
     return {k: float(v) for k, v in result.items()}
