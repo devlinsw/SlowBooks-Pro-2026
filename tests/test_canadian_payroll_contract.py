@@ -1522,6 +1522,35 @@ def test_unreviewed_applicability_rejects_blocked_result_without_missing_review_
         contract.CanadianPayrollEvaluation(request=request, result=blocked)
 
 
+def test_unreviewed_applicability_and_federal_scope_require_both_block_reasons():
+    request_payload = _unreviewed_applicability_test_request().model_dump(mode="python")
+    request_payload["employment_regulatory_scope"] = "federal"
+    request = CanadianPayrollRequest.model_validate(request_payload)
+    evaluation = contract.CanadianPayrollEvaluation
+    required_reasons = (
+        PayrollBlockReasonCode.MISSING_REVIEWED_COMPONENT,
+        PayrollBlockReasonCode.FEDERALLY_REGULATED_EMPLOYMENT,
+    )
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference=request.request_reference,
+        reason_codes=required_reasons,
+    )
+
+    paired = evaluation(request=request, result=blocked)
+    assert isinstance(paired.result, BlockedPayrollResult)
+    assert paired.result.reason_codes == required_reasons
+
+    for reason in required_reasons:
+        blocked_with_one_reason = BlockedPayrollResult(
+            status="blocked",
+            request_reference=request.request_reference,
+            reason_codes=(reason,),
+        )
+        with pytest.raises(ValidationError):
+            evaluation(request=request, result=blocked_with_one_reason)
+
+
 def test_unreviewed_applicability_rejects_calculated_result():
     request = _unreviewed_applicability_test_request()
     calculated = _structural_calculated_result(
