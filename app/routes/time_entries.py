@@ -242,6 +242,23 @@ class ClassifyRequest(StrictModel):
     state: str = "WA"
 
 
+_CANADIAN_PROVINCE_TERRITORY_CODES = {
+    "AB",
+    "BC",
+    "MB",
+    "NB",
+    "NL",
+    "NS",
+    "NT",
+    "NU",
+    "ON",
+    "PE",
+    "QC",
+    "SK",
+    "YT",
+}
+
+
 @router.post("/classify")
 def classify_hours(data: ClassifyRequest, db: Session = Depends(get_db)):
     """Classify hours only when no Canadian payroll jurisdiction is configured."""
@@ -265,6 +282,13 @@ def classify_hours(data: ClassifyRequest, db: Session = Depends(get_db)):
         ) from exc
 
     if company_history or employee_history_exists:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail="Canadian overtime classification support is not enabled yet.",
+        )
+
+    if data.state.strip().upper() in _CANADIAN_PROVINCE_TERRITORY_CODES:
         db.rollback()
         raise HTTPException(
             status_code=422,

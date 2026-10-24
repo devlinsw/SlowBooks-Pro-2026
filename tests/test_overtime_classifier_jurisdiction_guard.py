@@ -104,6 +104,58 @@ def test_no_jurisdiction_history_preserves_classifier_result(client, monkeypatch
     classifier_spy.assert_called_once_with(weeks, "WA")
 
 
+@pytest.mark.parametrize(
+    "state",
+    ["AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT"],
+)
+def test_explicit_canadian_state_code_is_rejected_without_history(
+    client, monkeypatch, state
+):
+    _, classifier_spy, _ = _classifier_spy(monkeypatch)
+
+    response = client.post(
+        "/api/time-entries/classify",
+        json={"weeks": [[8, 8, 8, 8, 8]], "state": state},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "Canadian overtime classification support is not enabled yet."
+    )
+    classifier_spy.assert_not_called()
+
+
+@pytest.mark.parametrize("state", ["on", " QC "])
+def test_canadian_state_code_detection_normalizes_case_and_whitespace(
+    client, monkeypatch, state
+):
+    _, classifier_spy, _ = _classifier_spy(monkeypatch)
+
+    response = client.post(
+        "/api/time-entries/classify",
+        json={"weeks": [[8, 8, 8, 8, 8]], "state": state},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "Canadian overtime classification support is not enabled yet."
+    )
+    classifier_spy.assert_not_called()
+
+
+def test_no_history_california_state_uses_daily_overtime_rule(client, monkeypatch):
+    _, classifier_spy, _ = _classifier_spy(monkeypatch)
+
+    response = client.post(
+        "/api/time-entries/classify",
+        json={"weeks": [[10, 10, 10, 10, 10]], "state": "CA"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"regular": 40.0, "overtime": 10.0, "doubletime": 0.0}
+    classifier_spy.assert_called_once_with([[Decimal("10")] * 5], "CA")
+
+
 def test_no_history_classifier_runs_before_jurisdiction_lock_transaction_ends(
     client, monkeypatch
 ):
