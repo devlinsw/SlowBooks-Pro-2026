@@ -29,6 +29,7 @@ PayrollResultStatus: TypeAlias = Literal["calculated", "blocked", "invalid_input
 CompanyPayrollCountry: TypeAlias = Literal["CA", "US"]
 EmploymentRegulatoryScope: TypeAlias = Literal["provincial", "federal"]
 EmployerRequirement: TypeAlias = Literal["employer_levy", "workers_compensation"]
+EffectiveDateBasis: TypeAlias = Literal["pay_date", "full_pay_period"]
 
 NonBlankReference: TypeAlias = Annotated[
     str, StringConstraints(strip_whitespace=True, strict=True, min_length=1)
@@ -69,9 +70,16 @@ class PayrollBlockReasonCode(str, Enum):
     MISSING_EMPLOYER_CONFIGURATION = "missing_employer_configuration"
     UNRESOLVED_SOURCE_CURRENCY = "unresolved_source_currency"
     UNREVIEWED_RULE_BUNDLE = "unreviewed_rule_bundle"
+    OTHER = "other"
+
+
+class InvalidInputReasonCode(str, Enum):
+    """Closed reasons for malformed or incomplete raw input, not policy blocks."""
+
     INVALID_PAY_PERIOD = "invalid_pay_period"
     UNCOVERED_JURISDICTION_HISTORY = "uncovered_jurisdiction_history"
-    OTHER = "other"
+    MALFORMED_INPUT = "malformed_input"
+    MISSING_INPUT = "missing_input"
 
 
 class PayPeriod(ContractModel):
@@ -86,6 +94,22 @@ class PayPeriod(ContractModel):
         if self.end_date < self.start_date:
             raise ValueError("period start must be on or before its end")
         return self
+
+
+def _require_effective_window_coverage(
+    effective_from, effective_to, date_basis, pay_period, subject
+):
+    if effective_from is None or effective_to is None or date_basis is None:
+        raise ValueError(f"{subject} has no reviewed effective-date basis/window")
+    if date_basis == "pay_date":
+        required_from = required_to = pay_period.pay_date
+    else:
+        required_from = pay_period.start_date
+        required_to = pay_period.end_date
+    if effective_from > required_from or effective_to < required_to:
+        raise ValueError(
+            f"{subject} effective window must cover the declared {date_basis} dates"
+        )
 
 
 class ReviewedDataReference(ContractModel):
@@ -171,7 +195,7 @@ class EarningFact(ContractModel):
 
 
 class EmployerConfigurationSnapshot(ContractModel):
-    """Immutable employer-specific configuration with its qualified review."""
+    """Immutable employer configuration with reviewed date-basis metadata."""
 
     employer_configuration_reference: NonBlankReference
     snapshot_reference: NonBlankReference
@@ -179,6 +203,37 @@ class EmployerConfigurationSnapshot(ContractModel):
     content_digest: NonBlankReference
     review_attestation_reference: NonBlankReference
     reviewer_qualification_reference: NonBlankReference
+    effective_from: date | None = None
+    effective_to: date | None = None
+    effective_date_basis: EffectiveDateBasis | None = None
+    applicability_review_attestation_reference: NonBlankReference | None = None
+    applicability_reviewer_qualification_reference: NonBlankReference | None = None
+
+    @model_validator(mode="after")
+    def effective_window_is_ordered(self):
+        metadata = (
+            self.effective_from,
+            self.effective_to,
+            self.effective_date_basis,
+            self.applicability_review_attestation_reference,
+            self.applicability_reviewer_qualification_reference,
+        )
+        if (
+            self.effective_from is None
+            or self.effective_to is None
+            or self.effective_date_basis is None
+            or self.applicability_review_attestation_reference is None
+            or self.applicability_reviewer_qualification_reference is None
+        ):
+            if all(value is None for value in metadata):
+                return self
+            raise ValueError(
+                "employer configuration effective-date window, basis, and qualified "
+                "applicability review references must be supplied together"
+            )
+        if self.effective_to < self.effective_from:
+            raise ValueError("employer configuration snapshot end must not precede its start")
+        return self
 
 
 class EmployerRequirementApplicability(ContractModel):
@@ -269,12 +324,43 @@ class CanadianPayrollRequest(ContractModel):
 
 
 class SourceSnapshot(ContractModel):
-    """Exact immutable identity for a cited source version."""
+    """Exact source identity and qualified review of its effective-date basis."""
 
     source_reference: NonBlankReference
     snapshot_reference: NonBlankReference
     version_reference: NonBlankReference
     content_digest: NonBlankReference
+    effective_from: date | None = None
+    effective_to: date | None = None
+    effective_date_basis: EffectiveDateBasis | None = None
+    applicability_review_attestation_reference: NonBlankReference | None = None
+    applicability_reviewer_qualification_reference: NonBlankReference | None = None
+
+    @model_validator(mode="after")
+    def effective_window_is_ordered(self):
+        metadata = (
+            self.effective_from,
+            self.effective_to,
+            self.effective_date_basis,
+            self.applicability_review_attestation_reference,
+            self.applicability_reviewer_qualification_reference,
+        )
+        if (
+            self.effective_from is None
+            or self.effective_to is None
+            or self.effective_date_basis is None
+            or self.applicability_review_attestation_reference is None
+            or self.applicability_reviewer_qualification_reference is None
+        ):
+            if all(value is None for value in metadata):
+                return self
+            raise ValueError(
+                "source effective-date window, basis, and qualified applicability "
+                "review references must be supplied together"
+            )
+        if self.effective_to < self.effective_from:
+            raise ValueError("source snapshot end must not precede its start")
+        return self
 
 
 class ComponentProvenance(ContractModel):
@@ -318,10 +404,9 @@ class EmployeeDeductionOutput(ContractModel):
 
 
 class EmployerContributionOutput(ContractModel):
-    """Generic contribution explicitly excludes the dedicated WCB output."""
+    """Generic statutory employer contribution, closed to CPP, CPP2, and EI."""
 
-    contribution_code: NonBlankReference
-    contribution_scope: Literal["non_workers_compensation"]
+    contribution_category: Literal["CPP", "CPP2", "EI"]
     amount: PayrollAmount
     provenance: ComponentProvenance
 
@@ -431,6 +516,16 @@ class CalculatedPayrollResult(ContractModel):
         ):
             provenances.append(component.provenance)
 
+        for snapshot in self.rule_snapshots:
+            for source_snapshot in snapshot.source_snapshots:
+                _require_effective_window_coverage(
+                    source_snapshot.effective_from,
+                    source_snapshot.effective_to,
+                    source_snapshot.effective_date_basis,
+                    self.pay_period,
+                    "source snapshot",
+                )
+
         for provenance in provenances:
             snapshot = snapshots_by_reference.get(provenance.rule_snapshot_reference)
             if snapshot is None:
@@ -469,7 +564,7 @@ class BlockedPayrollResult(ContractModel):
 class InvalidInputPayrollResult(ContractModel):
     status: Literal["invalid_input"]
     request_reference: NonBlankReference
-    reason_codes: tuple[PayrollBlockReasonCode, ...] = Field(min_length=1)
+    reason_codes: tuple[InvalidInputReasonCode, ...] = Field(min_length=1)
     warnings: tuple[NonBlankReference, ...] = ()
 
 
@@ -582,6 +677,13 @@ class CanadianPayrollEvaluation(ContractModel):
             configuration = decision.employer_configuration_snapshot
             if configuration is None:
                 raise ValueError(f"applicable {requirement} has no reviewed configuration")
+            _require_effective_window_coverage(
+                configuration.effective_from,
+                configuration.effective_to,
+                configuration.effective_date_basis,
+                request.pay_period,
+                "employer configuration snapshot",
+            )
             for output in outputs:
                 if (
                     output.employer_configuration_reference

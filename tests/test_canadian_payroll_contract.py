@@ -24,6 +24,7 @@ from app.schemas.canadian_payroll_contract import (
     EmployeeDeductionOutput,
     EmployerContributionOutput,
     InvalidInputPayrollResult,
+    InvalidInputReasonCode,
     JurisdictionSnapshot,
     PayrollAmount,
     PayrollBlockReasonCode,
@@ -58,6 +59,11 @@ def _employer_configuration_snapshot(
         content_digest=f"structural-{suffix}-config-digest",
         review_attestation_reference=f"structural-{suffix}-config-review",
         reviewer_qualification_reference=f"structural-{suffix}-config-qualification",
+        effective_from=date(2026, 5, 1),
+        effective_to=date(2026, 5, 7),
+        effective_date_basis="full_pay_period",
+        applicability_review_attestation_reference=f"structural-{suffix}-date-review",
+        applicability_reviewer_qualification_reference=f"structural-{suffix}-date-qualification",
     )
 
 
@@ -277,13 +283,17 @@ def test_all_money_uses_exact_decimal_and_rejects_binary_float_values():
         assert any(isinstance(item, BeforeValidator) for item in amount_field.metadata)
 
 
-def test_generic_employer_contribution_is_explicitly_non_workers_compensation():
-    scope_field = EmployerContributionOutput.model_fields["contribution_scope"]
-    assert get_args(scope_field.annotation) == ("non_workers_compensation",)
+def test_generic_employer_contribution_is_closed_to_cpp_categories():
+    category_field = EmployerContributionOutput.model_fields["contribution_category"]
+    assert get_args(category_field.annotation) == ("CPP", "CPP2", "EI")
+    assert EmployerContributionOutput(
+        contribution_category="CPP",
+        amount=Decimal("0"),
+        provenance=_snapshot_test_provenance(),
+    )
     with pytest.raises(ValidationError):
         EmployerContributionOutput(
-            contribution_code="structural-wcb",
-            contribution_scope="workers_compensation",
+            contribution_category="workers_compensation",
             amount=Decimal("0"),
             provenance=_snapshot_test_provenance(),
         )
@@ -303,6 +313,11 @@ def test_component_provenance_requires_sources_and_qualified_attestation():
                 snapshot_reference="source-snapshot",
                 version_reference="source-version",
                 content_digest="source-digest",
+                effective_from=date(2026, 5, 1),
+                effective_to=date(2026, 5, 7),
+                effective_date_basis="full_pay_period",
+                applicability_review_attestation_reference="source-date-review",
+                applicability_reviewer_qualification_reference="source-date-qualification",
             ),
         ),
         "qualified_review_attestation_reference": "review-record",
@@ -385,6 +400,11 @@ def test_jurisdiction_and_rule_snapshots_are_immutable_contract_objects():
                 snapshot_reference="source-snapshot",
                 version_reference="source-version",
                 content_digest="source-digest",
+                effective_from=date(2026, 5, 1),
+                effective_to=date(2026, 5, 7),
+                effective_date_basis="full_pay_period",
+                applicability_review_attestation_reference="source-date-review",
+                applicability_reviewer_qualification_reference="source-date-qualification",
             ),
         ),
     )
@@ -406,6 +426,11 @@ def _snapshot_test_source(**overrides):
         "snapshot_reference": "structural-source-snapshot",
         "version_reference": "structural-source-version",
         "content_digest": "structural-source-digest",
+        "effective_from": date(2026, 5, 1),
+        "effective_to": date(2026, 5, 7),
+        "effective_date_basis": "full_pay_period",
+        "applicability_review_attestation_reference": "structural-source-date-review",
+        "applicability_reviewer_qualification_reference": "structural-source-date-qualification",
     }
     values.update(overrides)
     return contract.SourceSnapshot(**values)
@@ -504,6 +529,11 @@ def test_employer_requirement_decisions_are_explicit_and_reviewed():
             content_digest="structural-employer-config-digest",
             review_attestation_reference="structural-employer-config-review",
             reviewer_qualification_reference="structural-employer-config-qualification",
+            effective_from=date(2026, 5, 1),
+            effective_to=date(2026, 5, 7),
+            effective_date_basis="full_pay_period",
+            applicability_review_attestation_reference="structural-employer-config-date-review",
+            applicability_reviewer_qualification_reference="structural-employer-config-date-qualification",
         ),
     )
     wcb_reviewed_not_applicable = applicability(
@@ -730,12 +760,22 @@ def test_source_provenance_must_match_source_snapshot_on_exact_rule_snapshot():
         snapshot_reference="cra-source-snapshot",
         version_reference="cra-version-1",
         content_digest="cra-digest-1",
+        effective_from=date(2026, 5, 1),
+        effective_to=date(2026, 5, 7),
+        effective_date_basis="full_pay_period",
+        applicability_review_attestation_reference="source-date-review",
+        applicability_reviewer_qualification_reference="source-date-qualification",
     )
     selected_source = contract.SourceSnapshot(
         source_reference="cra-source",
         snapshot_reference="cra-source-snapshot",
         version_reference="cra-version-2",
         content_digest="cra-digest-2",
+        effective_from=date(2026, 5, 1),
+        effective_to=date(2026, 5, 7),
+        effective_date_basis="full_pay_period",
+        applicability_review_attestation_reference="source-date-review",
+        applicability_reviewer_qualification_reference="source-date-qualification",
     )
     provenance = _snapshot_test_provenance(source_snapshots=(selected_source,))
 
@@ -947,6 +987,11 @@ def test_employer_configuration_snapshot_is_reviewed_and_immutable():
         content_digest="structural-config-digest",
         review_attestation_reference="structural-config-review",
         reviewer_qualification_reference="structural-config-qualification",
+        effective_from=date(2026, 5, 1),
+        effective_to=date(2026, 5, 7),
+        effective_date_basis="full_pay_period",
+        applicability_review_attestation_reference="structural-config-date-review",
+        applicability_reviewer_qualification_reference="structural-config-date-qualification",
     )
     with pytest.raises(ValidationError):
         snapshot.version_reference = "changed"
@@ -957,7 +1002,7 @@ def test_invalid_input_can_be_bound_without_a_valid_typed_request():
     malformed = InvalidInputPayrollResult(
         status="invalid_input",
         request_reference="malformed-payload-correlation",
-        reason_codes=(PayrollBlockReasonCode.INVALID_PAY_PERIOD,),
+        reason_codes=(InvalidInputReasonCode.INVALID_PAY_PERIOD,),
     )
     paired = evaluation(request=None, result=malformed)
     assert paired.request is None
@@ -969,7 +1014,7 @@ def test_valid_typed_request_cannot_be_paired_with_invalid_input_result():
     invalid = InvalidInputPayrollResult(
         status="invalid_input",
         request_reference=request.request_reference,
-        reason_codes=(PayrollBlockReasonCode.INVALID_PAY_PERIOD,),
+        reason_codes=(InvalidInputReasonCode.INVALID_PAY_PERIOD,),
     )
     with pytest.raises(ValidationError, match="valid typed request"):
         contract.CanadianPayrollEvaluation(request=request, result=invalid)
@@ -997,7 +1042,7 @@ def test_requestless_block_is_reserved_for_unsupported_jurisdiction():
 
 
 def test_uncovered_jurisdiction_history_has_specific_invalid_input_reason():
-    reason = _new_contract_api("PayrollBlockReasonCode").UNCOVERED_JURISDICTION_HISTORY
+    reason = InvalidInputReasonCode.UNCOVERED_JURISDICTION_HISTORY
     invalid = InvalidInputPayrollResult(
         status="invalid_input",
         request_reference="uncovered-history-correlation",
@@ -1005,3 +1050,339 @@ def test_uncovered_jurisdiction_history_has_specific_invalid_input_reason():
     )
     paired = contract.CanadianPayrollEvaluation(request=None, result=invalid)
     assert paired.result.reason_codes == (reason,)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        PayrollBlockReasonCode.UNSUPPORTED_JURISDICTION,
+        PayrollBlockReasonCode.FEDERALLY_REGULATED_EMPLOYMENT,
+    ],
+)
+def test_invalid_input_rejects_block_reason_codes(reason):
+    with pytest.raises(ValidationError):
+        InvalidInputPayrollResult(
+            status="invalid_input",
+            request_reference="unsupported-correlation",
+            reason_codes=(reason,),
+        )
+
+
+def test_invalid_input_reason_codes_are_separate_from_block_reasons():
+    assert not hasattr(PayrollBlockReasonCode, "INVALID_PAY_PERIOD")
+    assert not hasattr(PayrollBlockReasonCode, "UNCOVERED_JURISDICTION_HISTORY")
+    assert InvalidInputReasonCode.INVALID_PAY_PERIOD.value == "invalid_pay_period"
+    assert (
+        InvalidInputReasonCode.UNCOVERED_JURISDICTION_HISTORY.value
+        == "uncovered_jurisdiction_history"
+    )
+
+
+def test_generic_employer_contribution_has_only_closed_cpp_categories():
+    category_field = EmployerContributionOutput.model_fields["contribution_category"]
+    assert get_args(category_field.annotation) == ("CPP", "CPP2", "EI")
+    assert "contribution_code" not in EmployerContributionOutput.model_fields
+    assert "contribution_scope" not in EmployerContributionOutput.model_fields
+
+    for category in ("CPP", "CPP2", "EI"):
+        assert EmployerContributionOutput(
+            contribution_category=category,
+            amount=Decimal("0"),
+            provenance=_snapshot_test_provenance(),
+        )
+
+    for forbidden in ("employer_levy", "workers_compensation"):
+        with pytest.raises(ValidationError):
+            EmployerContributionOutput(
+                contribution_category=forbidden,
+                amount=Decimal("0"),
+                provenance=_snapshot_test_provenance(),
+            )
+
+
+def test_source_snapshot_effective_date_basis_controls_source_coverage():
+    source = _snapshot_test_source(
+        effective_from=date(2026, 5, 1),
+        effective_to=date(2026, 5, 7),
+        effective_date_basis="full_pay_period",
+        applicability_review_attestation_reference="structural-source-date-review",
+        applicability_reviewer_qualification_reference="structural-source-date-qualification",
+    )
+    provenance = _snapshot_test_provenance(source_snapshots=(source,))
+    rule = _snapshot_test_rule(source_snapshots=(source,))
+    earning = {
+        "earning_code": "structural-earning",
+        "amount": "0",
+        "provenance": provenance,
+    }
+    assert _structural_calculated_result(earnings=(earning,), rule_snapshots=(rule,))
+
+    pay_date_only = _snapshot_test_source(
+        snapshot_reference="pay-date-only-source",
+        effective_from=date(2026, 5, 12),
+        effective_to=date(2026, 5, 12),
+        effective_date_basis="pay_date",
+        applicability_review_attestation_reference="structural-source-date-review",
+        applicability_reviewer_qualification_reference="structural-source-date-qualification",
+    )
+    pay_date_provenance = _snapshot_test_provenance(
+        rule_snapshot_reference="pay-date-source-rule-snapshot",
+        source_snapshots=(pay_date_only,),
+    )
+    pay_date_rule = _snapshot_test_rule(
+        snapshot_reference="pay-date-source-rule-snapshot",
+        source_snapshots=(pay_date_only,),
+    )
+    assert _structural_calculated_result(
+        earnings=(
+            {
+                "earning_code": "structural-earning",
+                "amount": "0",
+                "provenance": pay_date_provenance,
+            },
+        ),
+        rule_snapshots=(pay_date_rule,),
+    )
+
+    uncovered = _snapshot_test_source(
+        snapshot_reference="uncovered-source",
+        effective_from=date(2026, 5, 2),
+        effective_to=date(2026, 5, 7),
+        effective_date_basis="full_pay_period",
+        applicability_review_attestation_reference="structural-source-date-review",
+        applicability_reviewer_qualification_reference="structural-source-date-qualification",
+    )
+    uncovered_provenance = _snapshot_test_provenance(
+        rule_snapshot_reference="uncovered-source-rule-snapshot",
+        source_snapshots=(uncovered,),
+    )
+    uncovered_rule = _snapshot_test_rule(
+        snapshot_reference="uncovered-source-rule-snapshot",
+        source_snapshots=(uncovered,),
+    )
+    with pytest.raises(ValidationError, match="source snapshot.*cover"):
+        _structural_calculated_result(
+            earnings=(
+                {
+                    "earning_code": "structural-earning",
+                    "amount": "0",
+                    "provenance": uncovered_provenance,
+                },
+            ),
+            rule_snapshots=(uncovered_rule,),
+        )
+
+
+def test_employer_configuration_snapshot_covers_its_declared_date_basis():
+    evaluation = _new_contract_api("CanadianPayrollEvaluation")
+
+    def evaluated_snapshot(*, effective_from, effective_to, effective_date_basis):
+        snapshot = contract.EmployerConfigurationSnapshot(
+            employer_configuration_reference="structural-date-config",
+            snapshot_reference="structural-date-config-snapshot",
+            version_reference="structural-date-config-version",
+            content_digest="structural-date-config-digest",
+            review_attestation_reference="structural-date-config-review",
+            reviewer_qualification_reference="structural-date-config-qualification",
+            effective_from=effective_from,
+            effective_to=effective_to,
+            effective_date_basis=effective_date_basis,
+            applicability_review_attestation_reference="structural-date-config-applicability-review",
+            applicability_reviewer_qualification_reference="structural-date-config-applicability-qualification",
+        )
+        configuration = EmployerConfigurationReferences(
+            applicability_decisions=(
+                contract.EmployerRequirementApplicability(
+                    requirement="employer_levy",
+                    decision="applicable",
+                    review_attestation_reference="structural-levy-review",
+                    reviewer_qualification_reference="structural-levy-qualification",
+                    employer_configuration_snapshot=snapshot,
+                ),
+                contract.EmployerRequirementApplicability(
+                    requirement="workers_compensation",
+                    decision="reviewed_not_applicable",
+                    review_attestation_reference="structural-wcb-review",
+                    reviewer_qualification_reference="structural-wcb-qualification",
+                ),
+            )
+        )
+        request = make_request(employer_configuration_references=configuration)
+        result = _structural_calculated_result(
+            request_reference=request.request_reference,
+            employee_reference=request.employee_reference,
+            pay_period=request.pay_period,
+            approved_employer_levies=(
+                ApprovedEmployerLevyOutput(
+                    levy_code="structural-levy",
+                    amount=Decimal("0"),
+                    employer_configuration_reference=snapshot.employer_configuration_reference,
+                    employer_configuration_snapshot_reference=snapshot.snapshot_reference,
+                    approval_reference="structural-levy-approval",
+                    provenance=_snapshot_test_provenance(),
+                ),
+            ),
+        )
+        return evaluation(request=request, result=result)
+
+    assert evaluated_snapshot(
+        effective_from=date(2026, 5, 12),
+        effective_to=date(2026, 5, 12),
+        effective_date_basis="pay_date",
+    )
+    with pytest.raises(ValidationError, match="employer configuration snapshot.*cover"):
+        evaluated_snapshot(
+            effective_from=date(2026, 5, 2),
+            effective_to=date(2026, 5, 12),
+            effective_date_basis="full_pay_period",
+        )
+
+
+@pytest.mark.parametrize(
+    "snapshot_factory,values",
+    [
+        (
+            lambda **values: contract.SourceSnapshot(
+                source_reference="structural-source",
+                snapshot_reference="ordered-source",
+                version_reference="structural-source-version",
+                content_digest="structural-source-digest",
+                effective_date_basis="pay_date",
+                applicability_review_attestation_reference="structural-review",
+                applicability_reviewer_qualification_reference="structural-qualification",
+                **values,
+            ),
+            {"effective_from": date(2026, 5, 13), "effective_to": date(2026, 5, 12)},
+        ),
+        (
+            lambda **values: contract.EmployerConfigurationSnapshot(
+                employer_configuration_reference="structural-config",
+                snapshot_reference="ordered-config",
+                version_reference="structural-config-version",
+                content_digest="structural-config-digest",
+                review_attestation_reference="structural-review",
+                reviewer_qualification_reference="structural-qualification",
+                effective_date_basis="pay_date",
+                applicability_review_attestation_reference="structural-date-review",
+                applicability_reviewer_qualification_reference="structural-date-qualification",
+                **values,
+            ),
+            {"effective_from": date(2026, 5, 13), "effective_to": date(2026, 5, 12)},
+        ),
+    ],
+)
+def test_effective_snapshot_date_ranges_must_be_ordered(snapshot_factory, values):
+    with pytest.raises(ValidationError, match="end must not precede its start"):
+        snapshot_factory(**values)
+
+
+def test_unspecified_source_date_basis_allows_blocking_but_not_calculated_output():
+    source = contract.SourceSnapshot(
+        source_reference="structural-unreviewed-source",
+        snapshot_reference="structural-unreviewed-source-snapshot",
+        version_reference="structural-unreviewed-source-version",
+        content_digest="structural-unreviewed-source-digest",
+    )
+    rule = _snapshot_test_rule(source_snapshots=(source,))
+    provenance = _snapshot_test_provenance(source_snapshots=(source,))
+
+    with pytest.raises(ValidationError, match="no reviewed effective-date basis"):
+        _structural_calculated_result(
+            earnings=(
+                {
+                    "earning_code": "structural-earning",
+                    "amount": "0",
+                    "provenance": provenance,
+                },
+            ),
+            rule_snapshots=(rule,),
+        )
+
+    request = make_request()
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference=request.request_reference,
+        reason_codes=(PayrollBlockReasonCode.MISSING_REVIEWED_COMPONENT,),
+        rule_snapshots=(rule,),
+    )
+    assert contract.CanadianPayrollEvaluation(request=request, result=blocked)
+
+
+def test_unspecified_employer_configuration_date_basis_stays_blocked():
+    snapshot = contract.EmployerConfigurationSnapshot(
+        employer_configuration_reference="structural-unreviewed-config",
+        snapshot_reference="structural-unreviewed-config-snapshot",
+        version_reference="structural-unreviewed-config-version",
+        content_digest="structural-unreviewed-config-digest",
+        review_attestation_reference="structural-config-review",
+        reviewer_qualification_reference="structural-config-qualification",
+    )
+    configuration = EmployerConfigurationReferences(
+        applicability_decisions=(
+            contract.EmployerRequirementApplicability(
+                requirement="employer_levy",
+                decision="applicable",
+                review_attestation_reference="structural-levy-review",
+                reviewer_qualification_reference="structural-levy-qualification",
+                employer_configuration_snapshot=snapshot,
+            ),
+            contract.EmployerRequirementApplicability(
+                requirement="workers_compensation",
+                decision="reviewed_not_applicable",
+                review_attestation_reference="structural-wcb-review",
+                reviewer_qualification_reference="structural-wcb-qualification",
+            ),
+        )
+    )
+    request = make_request(employer_configuration_references=configuration)
+    result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+        approved_employer_levies=(
+            ApprovedEmployerLevyOutput(
+                levy_code="structural-levy",
+                amount=Decimal("0"),
+                employer_configuration_reference=snapshot.employer_configuration_reference,
+                employer_configuration_snapshot_reference=snapshot.snapshot_reference,
+                approval_reference="structural-levy-approval",
+                provenance=_snapshot_test_provenance(),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="no reviewed effective-date basis"):
+        contract.CanadianPayrollEvaluation(request=request, result=result)
+
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference=request.request_reference,
+        reason_codes=(PayrollBlockReasonCode.MISSING_REVIEWED_COMPONENT,),
+    )
+    assert contract.CanadianPayrollEvaluation(request=request, result=blocked)
+
+
+@pytest.mark.parametrize(
+    "snapshot_factory",
+    [
+        lambda: contract.SourceSnapshot(
+            source_reference="structural-source",
+            snapshot_reference="partial-source",
+            version_reference="structural-source-version",
+            content_digest="structural-source-digest",
+            effective_from=date(2026, 5, 1),
+        ),
+        lambda: contract.EmployerConfigurationSnapshot(
+            employer_configuration_reference="structural-config",
+            snapshot_reference="partial-config",
+            version_reference="structural-config-version",
+            content_digest="structural-config-digest",
+            review_attestation_reference="structural-review",
+            reviewer_qualification_reference="structural-qualification",
+            effective_from=date(2026, 5, 1),
+        ),
+    ],
+)
+def test_effective_date_metadata_cannot_be_partially_specified(snapshot_factory):
+    with pytest.raises(ValidationError, match="must be supplied together"):
+        snapshot_factory()
