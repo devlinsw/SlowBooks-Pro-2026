@@ -1,7 +1,7 @@
 # Canadian payroll scope and source-to-requirement matrix
 
 **Status: OWNER-APPROVED SCOPE; DESIGN / IMPLEMENTATION IN PROGRESS; NOT RELEASE-READY.**
-Scope approval is not legal, tax, or payroll reviewer sign-off; none is recorded here. Source review checked on 2026-10-22. This document supersedes the payroll portion of [canada.md](canada.md); that document remains PARKED for its unrelated sales-tax and conversion material.
+Scope approval is not legal, tax, or payroll reviewer sign-off; none is recorded here. The topic-source matrix was checked on 2026-10-22. The companion [2026 source-version register](canadian-payroll-source-register.md) records official source/date discovery retrieved on 2026-10-24; that work is not qualified review. This document supersedes the payroll portion of [canada.md](canada.md); that document remains PARKED for its unrelated sales-tax and conversion material.
 
 ## Approved boundary
 
