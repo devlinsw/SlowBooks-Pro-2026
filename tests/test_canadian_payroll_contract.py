@@ -1,6 +1,6 @@
 from datetime import date
 from decimal import Decimal
-from typing import get_args, get_origin
+from typing import Literal, get_args, get_origin
 
 import pytest
 from pydantic import BeforeValidator, TypeAdapter, ValidationError
@@ -47,6 +47,53 @@ def make_reviewed_reference(reference_id="reviewed-record"):
     )
 
 
+def _employer_configuration_snapshot(
+    requirement: Literal["employer_levy", "workers_compensation"],
+):
+    suffix = "levy" if requirement == "employer_levy" else "wcb"
+    return contract.EmployerConfigurationSnapshot(
+        employer_configuration_reference=f"structural-{suffix}-config",
+        snapshot_reference=f"structural-{suffix}-config-snapshot",
+        version_reference=f"structural-{suffix}-config-version",
+        content_digest=f"structural-{suffix}-config-digest",
+        review_attestation_reference=f"structural-{suffix}-config-review",
+        reviewer_qualification_reference=f"structural-{suffix}-config-qualification",
+    )
+
+
+def make_employer_configuration(
+    *,
+    levy: Literal["applicable", "reviewed_not_applicable"] = "reviewed_not_applicable",
+    wcb: Literal["applicable", "reviewed_not_applicable"] = "reviewed_not_applicable",
+):
+    return EmployerConfigurationReferences(
+        applicability_decisions=(
+            contract.EmployerRequirementApplicability(
+                requirement="employer_levy",
+                decision=levy,
+                review_attestation_reference="structural-levy-review",
+                reviewer_qualification_reference="structural-levy-qualification",
+                employer_configuration_snapshot=(
+                    _employer_configuration_snapshot("employer_levy")
+                    if levy == "applicable"
+                    else None
+                ),
+            ),
+            contract.EmployerRequirementApplicability(
+                requirement="workers_compensation",
+                decision=wcb,
+                review_attestation_reference="structural-wcb-review",
+                reviewer_qualification_reference="structural-wcb-qualification",
+                employer_configuration_snapshot=(
+                    _employer_configuration_snapshot("workers_compensation")
+                    if wcb == "applicable"
+                    else None
+                ),
+            ),
+        )
+    )
+
+
 def make_request(*, assignments=None, **overrides):
     # Synthetic schema evidence only; these statuses do not assert liability.
     values = {
@@ -82,24 +129,7 @@ def make_request(*, assignments=None, **overrides):
         "employee_eligibility_reference": make_reviewed_reference("eligibility"),
         "earning_facts": (),
         "prior_ytd_by_basis": (),
-        "employer_configuration_references": EmployerConfigurationReferences(
-            applicability_decisions=(
-                contract.EmployerRequirementApplicability(
-                    requirement="employer_levy",
-                    decision="applicable",
-                    review_attestation_reference="structural-levy-review",
-                    reviewer_qualification_reference="structural-levy-qualification",
-                    employer_configuration_reference="structural-levy-config",
-                ),
-                contract.EmployerRequirementApplicability(
-                    requirement="workers_compensation",
-                    decision="applicable",
-                    review_attestation_reference="structural-wcb-review",
-                    reviewer_qualification_reference="structural-wcb-qualification",
-                    employer_configuration_reference="structural-wcb-config",
-                ),
-            )
-        ),
+        "employer_configuration_references": make_employer_configuration(),
     }
     values.update(overrides)
     return CanadianPayrollRequest(**values)
@@ -236,6 +266,7 @@ def test_all_money_uses_exact_decimal_and_rejects_binary_float_values():
         EmployeeDeductionOutput,
         EmployerContributionOutput,
         ApprovedEmployerLevyOutput,
+        contract.ApprovedWorkersCompensationOutput,
     ):
         amount_field = model.model_fields["amount"]
         assert amount_field.annotation is Decimal
@@ -244,6 +275,18 @@ def test_all_money_uses_exact_decimal_and_rejects_binary_float_values():
         amount_field = PayrollTotals.model_fields[field_name]
         assert amount_field.annotation is Decimal
         assert any(isinstance(item, BeforeValidator) for item in amount_field.metadata)
+
+
+def test_generic_employer_contribution_is_explicitly_non_workers_compensation():
+    scope_field = EmployerContributionOutput.model_fields["contribution_scope"]
+    assert get_args(scope_field.annotation) == ("non_workers_compensation",)
+    with pytest.raises(ValidationError):
+        EmployerContributionOutput(
+            contribution_code="structural-wcb",
+            contribution_scope="workers_compensation",
+            amount=Decimal("0"),
+            provenance=_snapshot_test_provenance(),
+        )
 
 
 def test_component_provenance_requires_sources_and_qualified_attestation():
@@ -336,6 +379,14 @@ def test_jurisdiction_and_rule_snapshots_are_immutable_contract_objects():
         effective_pay_date=date(2026, 5, 12),
         qualified_review_attestation_reference="review-attestation",
         reviewer_qualification_reference="reviewer-qualification",
+        source_snapshots=(
+            contract.SourceSnapshot(
+                source_reference="source",
+                snapshot_reference="source-snapshot",
+                version_reference="source-version",
+                content_digest="source-digest",
+            ),
+        ),
     )
 
     with pytest.raises(ValidationError):
@@ -349,6 +400,17 @@ def _new_contract_api(name):
     return getattr(contract, name)
 
 
+def _snapshot_test_source(**overrides):
+    values = {
+        "source_reference": "structural-source",
+        "snapshot_reference": "structural-source-snapshot",
+        "version_reference": "structural-source-version",
+        "content_digest": "structural-source-digest",
+    }
+    values.update(overrides)
+    return contract.SourceSnapshot(**values)
+
+
 def _snapshot_test_provenance(**overrides):
     values = {
         "component_reference": "structural-component",
@@ -357,14 +419,7 @@ def _snapshot_test_provenance(**overrides):
         "rule_version_reference": "structural-version",
         "rule_content_digest": "structural-rule-digest",
         "rule_reference": "structural-rule",
-        "source_snapshots": (
-            {
-                "source_reference": "structural-source",
-                "snapshot_reference": "structural-source-snapshot",
-                "version_reference": "structural-source-version",
-                "content_digest": "structural-source-digest",
-            },
-        ),
+        "source_snapshots": (_snapshot_test_source(),),
         "qualified_review_attestation_reference": "structural-review",
         "reviewer_qualification_reference": "structural-qualification",
     }
@@ -381,6 +436,7 @@ def _snapshot_test_rule(**overrides):
         "effective_pay_date": date(2026, 5, 12),
         "qualified_review_attestation_reference": "structural-review",
         "reviewer_qualification_reference": "structural-qualification",
+        "source_snapshots": (_snapshot_test_source(),),
     }
     values.update(overrides)
     return contract.RuleSnapshot(**values)
@@ -441,7 +497,14 @@ def test_employer_requirement_decisions_are_explicit_and_reviewed():
         decision="applicable",
         review_attestation_reference="structural-levy-review",
         reviewer_qualification_reference="structural-levy-qualification",
-        employer_configuration_reference="structural-employer-config",
+        employer_configuration_snapshot=contract.EmployerConfigurationSnapshot(
+            employer_configuration_reference="structural-employer-config",
+            snapshot_reference="structural-employer-config-snapshot",
+            version_reference="structural-employer-config-version",
+            content_digest="structural-employer-config-digest",
+            review_attestation_reference="structural-employer-config-review",
+            reviewer_qualification_reference="structural-employer-config-qualification",
+        ),
     )
     wcb_reviewed_not_applicable = applicability(
         requirement="workers_compensation",
@@ -659,3 +722,286 @@ def test_request_result_reference_must_match_exactly():
     )
     with pytest.raises(ValidationError, match="request reference"):
         evaluation(request=request, result=result)
+
+
+def test_source_provenance_must_match_source_snapshot_on_exact_rule_snapshot():
+    source = contract.SourceSnapshot(
+        source_reference="cra-source",
+        snapshot_reference="cra-source-snapshot",
+        version_reference="cra-version-1",
+        content_digest="cra-digest-1",
+    )
+    selected_source = contract.SourceSnapshot(
+        source_reference="cra-source",
+        snapshot_reference="cra-source-snapshot",
+        version_reference="cra-version-2",
+        content_digest="cra-digest-2",
+    )
+    provenance = _snapshot_test_provenance(source_snapshots=(selected_source,))
+
+    with pytest.raises(ValidationError, match="source snapshot"):
+        rule_snapshot = _snapshot_test_rule(source_snapshots=(source,))
+        _structural_calculated_result(
+            earnings=(
+                {
+                    "earning_code": "structural-earning",
+                    "amount": "0",
+                    "provenance": provenance,
+                },
+            ),
+            rule_snapshots=(rule_snapshot,),
+        )
+
+
+def test_component_provenance_rejects_unrelated_source_snapshot():
+    rule_source = _snapshot_test_source()
+    unrelated_source = _snapshot_test_source(
+        source_reference="unrelated-source",
+        snapshot_reference="unrelated-source-snapshot",
+        version_reference="unrelated-version",
+        content_digest="unrelated-digest",
+    )
+    provenance = _snapshot_test_provenance(source_snapshots=(unrelated_source,))
+    rule_snapshot = _snapshot_test_rule(source_snapshots=(rule_source,))
+
+    with pytest.raises(ValidationError, match="source snapshots must match"):
+        _structural_calculated_result(
+            earnings=(
+                {
+                    "earning_code": "structural-earning",
+                    "amount": "0",
+                    "provenance": provenance,
+                },
+            ),
+            rule_snapshots=(rule_snapshot,),
+        )
+
+
+# Decimal zeroes in employer-output records below are shape placeholders only.
+def test_calculated_result_requires_applicable_levy_and_wcb_outputs():
+    evaluation = _new_contract_api("CanadianPayrollEvaluation")
+    request = make_request(
+        employer_configuration_references=make_employer_configuration(
+            levy="applicable", wcb="applicable"
+        )
+    )
+    result_without_either = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+    )
+    with pytest.raises(ValidationError, match="employer levy"):
+        evaluation(request=request, result=result_without_either)
+
+    levy_only = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+        approved_employer_levies=(
+            ApprovedEmployerLevyOutput(
+                levy_code="structural-levy",
+                amount=Decimal("0"),
+                employer_configuration_reference="structural-levy-config",
+                employer_configuration_snapshot_reference="structural-levy-config-snapshot",
+                approval_reference="structural-levy-approval",
+                provenance=_snapshot_test_provenance(),
+            ),
+        ),
+    )
+    with pytest.raises(ValidationError, match="workers compensation"):
+        evaluation(request=request, result=levy_only)
+
+
+def test_calculated_employer_output_must_reference_exact_request_configuration():
+    evaluation = _new_contract_api("CanadianPayrollEvaluation")
+    request = make_request(
+        employer_configuration_references=make_employer_configuration(
+            levy="applicable", wcb="applicable"
+        )
+    )
+    result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+        approved_employer_levies=(
+            ApprovedEmployerLevyOutput(
+                levy_code="structural-levy",
+                amount=Decimal("0"),
+                employer_configuration_reference="unrelated-config",
+                employer_configuration_snapshot_reference="unrelated-snapshot",
+                approval_reference="structural-levy-approval",
+                provenance=_snapshot_test_provenance(),
+            ),
+        ),
+        approved_workers_compensation=(
+            contract.ApprovedWorkersCompensationOutput(
+                workers_compensation_code="structural-wcb",
+                amount=Decimal("0"),
+                employer_configuration_reference="structural-wcb-config",
+                employer_configuration_snapshot_reference="structural-wcb-config-snapshot",
+                approval_reference="structural-wcb-approval",
+                provenance=_snapshot_test_provenance(),
+            ),
+        ),
+    )
+    with pytest.raises(ValidationError, match="configuration"):
+        evaluation(request=request, result=result)
+
+
+def test_matching_employer_outputs_bind_to_both_reviewed_configurations():
+    request = make_request(
+        employer_configuration_references=make_employer_configuration(
+            levy="applicable", wcb="applicable"
+        )
+    )
+    result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+        approved_employer_levies=(
+            ApprovedEmployerLevyOutput(
+                levy_code="structural-levy",
+                amount=Decimal("0"),
+                employer_configuration_reference="structural-levy-config",
+                employer_configuration_snapshot_reference="structural-levy-config-snapshot",
+                approval_reference="structural-levy-approval",
+                provenance=_snapshot_test_provenance(),
+            ),
+        ),
+        approved_workers_compensation=(
+            contract.ApprovedWorkersCompensationOutput(
+                workers_compensation_code="structural-wcb",
+                amount=Decimal("0"),
+                employer_configuration_reference="structural-wcb-config",
+                employer_configuration_snapshot_reference="structural-wcb-config-snapshot",
+                approval_reference="structural-wcb-approval",
+                provenance=_snapshot_test_provenance(),
+            ),
+        ),
+    )
+
+    paired = contract.CanadianPayrollEvaluation(request=request, result=result)
+    assert paired.result is result
+
+
+def test_reviewed_not_applicable_workers_compensation_forbids_wcb_output():
+    request = make_request(
+        employer_configuration_references=make_employer_configuration(
+            levy="applicable", wcb="reviewed_not_applicable"
+        )
+    )
+    levy = ApprovedEmployerLevyOutput(
+        levy_code="structural-levy",
+        amount=Decimal("0"),
+        employer_configuration_reference="structural-levy-config",
+        employer_configuration_snapshot_reference="structural-levy-config-snapshot",
+        approval_reference="structural-levy-approval",
+        provenance=_snapshot_test_provenance(),
+    )
+    wcb = contract.ApprovedWorkersCompensationOutput(
+        workers_compensation_code="structural-wcb",
+        amount=Decimal("0"),
+        employer_configuration_reference="structural-wcb-config",
+        employer_configuration_snapshot_reference="structural-wcb-config-snapshot",
+        approval_reference="structural-wcb-approval",
+        provenance=_snapshot_test_provenance(),
+    )
+    result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+        approved_employer_levies=(levy,),
+        approved_workers_compensation=(wcb,),
+    )
+    with pytest.raises(ValidationError, match="not-applicable"):
+        contract.CanadianPayrollEvaluation(request=request, result=result)
+
+
+def test_reviewed_not_applicable_levy_forbids_levy_output():
+    request = make_request()
+    levy = ApprovedEmployerLevyOutput(
+        levy_code="structural-levy",
+        amount=Decimal("0"),
+        employer_configuration_reference="unlisted-config",
+        employer_configuration_snapshot_reference="unlisted-snapshot",
+        approval_reference="structural-levy-approval",
+        provenance=_snapshot_test_provenance(),
+    )
+    result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+        approved_employer_levies=(levy,),
+    )
+
+    with pytest.raises(ValidationError, match="not-applicable"):
+        contract.CanadianPayrollEvaluation(request=request, result=result)
+
+
+def test_employer_configuration_snapshot_is_reviewed_and_immutable():
+    configuration_snapshot = _new_contract_api("EmployerConfigurationSnapshot")
+    snapshot = configuration_snapshot(
+        employer_configuration_reference="structural-config",
+        snapshot_reference="structural-config-snapshot",
+        version_reference="structural-config-version",
+        content_digest="structural-config-digest",
+        review_attestation_reference="structural-config-review",
+        reviewer_qualification_reference="structural-config-qualification",
+    )
+    with pytest.raises(ValidationError):
+        snapshot.version_reference = "changed"
+
+
+def test_invalid_input_can_be_bound_without_a_valid_typed_request():
+    evaluation = _new_contract_api("CanadianPayrollEvaluation")
+    malformed = InvalidInputPayrollResult(
+        status="invalid_input",
+        request_reference="malformed-payload-correlation",
+        reason_codes=(PayrollBlockReasonCode.INVALID_PAY_PERIOD,),
+    )
+    paired = evaluation(request=None, result=malformed)
+    assert paired.request is None
+    assert paired.result.request_reference == "malformed-payload-correlation"
+
+
+def test_valid_typed_request_cannot_be_paired_with_invalid_input_result():
+    request = make_request()
+    invalid = InvalidInputPayrollResult(
+        status="invalid_input",
+        request_reference=request.request_reference,
+        reason_codes=(PayrollBlockReasonCode.INVALID_PAY_PERIOD,),
+    )
+    with pytest.raises(ValidationError, match="valid typed request"):
+        contract.CanadianPayrollEvaluation(request=request, result=invalid)
+
+
+def test_unsupported_jurisdiction_can_be_blocked_without_typed_request():
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference="unsupported-province-correlation",
+        reason_codes=(PayrollBlockReasonCode.UNSUPPORTED_JURISDICTION,),
+    )
+    paired = contract.CanadianPayrollEvaluation(request=None, result=blocked)
+    assert paired.request is None
+    assert paired.result.reason_codes == (PayrollBlockReasonCode.UNSUPPORTED_JURISDICTION,)
+
+
+def test_requestless_block_is_reserved_for_unsupported_jurisdiction():
+    blocked = BlockedPayrollResult(
+        status="blocked",
+        request_reference="unreviewed-correlation",
+        reason_codes=(PayrollBlockReasonCode.MISSING_REVIEWED_COMPONENT,),
+    )
+    with pytest.raises(ValidationError, match="unsupported jurisdiction"):
+        contract.CanadianPayrollEvaluation(request=None, result=blocked)
+
+
+def test_uncovered_jurisdiction_history_has_specific_invalid_input_reason():
+    reason = _new_contract_api("PayrollBlockReasonCode").UNCOVERED_JURISDICTION_HISTORY
+    invalid = InvalidInputPayrollResult(
+        status="invalid_input",
+        request_reference="uncovered-history-correlation",
+        reason_codes=(reason,),
+    )
+    paired = contract.CanadianPayrollEvaluation(request=None, result=invalid)
+    assert paired.result.reason_codes == (reason,)

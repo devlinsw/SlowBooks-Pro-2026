@@ -70,6 +70,7 @@ class PayrollBlockReasonCode(str, Enum):
     UNRESOLVED_SOURCE_CURRENCY = "unresolved_source_currency"
     UNREVIEWED_RULE_BUNDLE = "unreviewed_rule_bundle"
     INVALID_PAY_PERIOD = "invalid_pay_period"
+    UNCOVERED_JURISDICTION_HISTORY = "uncovered_jurisdiction_history"
     OTHER = "other"
 
 
@@ -169,6 +170,17 @@ class EarningFact(ContractModel):
     basis_codes: tuple[NonBlankReference, ...] = ()
 
 
+class EmployerConfigurationSnapshot(ContractModel):
+    """Immutable employer-specific configuration with its qualified review."""
+
+    employer_configuration_reference: NonBlankReference
+    snapshot_reference: NonBlankReference
+    version_reference: NonBlankReference
+    content_digest: NonBlankReference
+    review_attestation_reference: NonBlankReference
+    reviewer_qualification_reference: NonBlankReference
+
+
 class EmployerRequirementApplicability(ContractModel):
     """Reviewed evidence for one levy or workers' compensation requirement."""
 
@@ -176,15 +188,15 @@ class EmployerRequirementApplicability(ContractModel):
     decision: Literal["applicable", "reviewed_not_applicable"]
     review_attestation_reference: NonBlankReference
     reviewer_qualification_reference: NonBlankReference
-    employer_configuration_reference: NonBlankReference | None = None
+    employer_configuration_snapshot: EmployerConfigurationSnapshot | None = None
 
     @model_validator(mode="after")
     def decision_has_required_evidence(self):
-        if self.decision == "applicable" and self.employer_configuration_reference is None:
+        if self.decision == "applicable" and self.employer_configuration_snapshot is None:
             raise ValueError("applicable employer requirement needs reviewed employer configuration")
         if (
             self.decision == "reviewed_not_applicable"
-            and self.employer_configuration_reference is not None
+            and self.employer_configuration_snapshot is not None
         ):
             raise ValueError("reviewed not-applicable decision must not carry employer configuration")
         return self
@@ -278,6 +290,13 @@ class ComponentProvenance(ContractModel):
     qualified_review_attestation_reference: NonBlankReference
     reviewer_qualification_reference: NonBlankReference
 
+    @model_validator(mode="after")
+    def source_snapshots_are_unique(self):
+        references = tuple(snapshot.snapshot_reference for snapshot in self.source_snapshots)
+        if len(references) != len(set(references)):
+            raise ValueError("component source snapshot references must be unique")
+        return self
+
 
 class EarningBasisOutput(ContractModel):
     basis_code: NonBlankReference
@@ -299,7 +318,10 @@ class EmployeeDeductionOutput(ContractModel):
 
 
 class EmployerContributionOutput(ContractModel):
+    """Generic contribution explicitly excludes the dedicated WCB output."""
+
     contribution_code: NonBlankReference
+    contribution_scope: Literal["non_workers_compensation"]
     amount: PayrollAmount
     provenance: ComponentProvenance
 
@@ -308,6 +330,18 @@ class ApprovedEmployerLevyOutput(ContractModel):
     levy_code: NonBlankReference
     amount: PayrollAmount
     employer_configuration_reference: NonBlankReference
+    employer_configuration_snapshot_reference: NonBlankReference
+    approval_reference: NonBlankReference
+    provenance: ComponentProvenance
+
+
+class ApprovedWorkersCompensationOutput(ContractModel):
+    """Explicit WCB output, separate from unlinked generic contributions."""
+
+    workers_compensation_code: NonBlankReference
+    amount: PayrollAmount
+    employer_configuration_reference: NonBlankReference
+    employer_configuration_snapshot_reference: NonBlankReference
     approval_reference: NonBlankReference
     provenance: ComponentProvenance
 
@@ -346,6 +380,14 @@ class RuleSnapshot(ContractModel):
     effective_pay_date: date
     qualified_review_attestation_reference: NonBlankReference
     reviewer_qualification_reference: NonBlankReference
+    source_snapshots: tuple[SourceSnapshot, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def source_snapshots_are_unique(self):
+        references = tuple(snapshot.snapshot_reference for snapshot in self.source_snapshots)
+        if len(references) != len(set(references)):
+            raise ValueError("rule source snapshot references must be unique")
+        return self
 
 
 class CalculatedPayrollResult(ContractModel):
@@ -359,6 +401,7 @@ class CalculatedPayrollResult(ContractModel):
     employee_deductions: tuple[EmployeeDeductionOutput, ...] = ()
     employer_contributions: tuple[EmployerContributionOutput, ...] = ()
     approved_employer_levies: tuple[ApprovedEmployerLevyOutput, ...] = ()
+    approved_workers_compensation: tuple[ApprovedWorkersCompensationOutput, ...] = ()
     totals: PayrollTotals
     jurisdiction_snapshot: JurisdictionSnapshot
     rule_snapshots: tuple[RuleSnapshot, ...] = Field(min_length=1)
@@ -384,6 +427,7 @@ class CalculatedPayrollResult(ContractModel):
             *self.employee_deductions,
             *self.employer_contributions,
             *self.approved_employer_levies,
+            *self.approved_workers_compensation,
         ):
             provenances.append(component.provenance)
 
@@ -401,6 +445,13 @@ class CalculatedPayrollResult(ContractModel):
                 != snapshot.reviewer_qualification_reference
             ):
                 raise ValueError("component provenance must match its exact rule snapshot")
+            if any(
+                source not in snapshot.source_snapshots
+                for source in provenance.source_snapshots
+            ):
+                raise ValueError(
+                    "component source snapshots must match sources on its exact rule snapshot"
+                )
             if snapshot.effective_pay_date != self.pay_period.pay_date:
                 raise ValueError("rule snapshot pay date must match the result pay date")
         return self
@@ -429,17 +480,30 @@ CanadianPayrollResult: TypeAlias = Annotated[
 
 
 class CanadianPayrollEvaluation(ContractModel):
-    """Request-bound result; unsupported request contexts cannot carry totals."""
+    """Bind typed requests or raw-input outcomes by their request/correlation reference."""
 
-    request: CanadianPayrollRequest
+    request: CanadianPayrollRequest | None = None
     result: CanadianPayrollResult
 
     @model_validator(mode="after")
     def result_matches_request_and_supported_context(self):
         request = self.request
         result = self.result
+        if request is None:
+            if result.status == "invalid_input":
+                return self
+            if result.status == "blocked" and set(result.reason_codes) == {
+                PayrollBlockReasonCode.UNSUPPORTED_JURISDICTION
+            }:
+                return self
+            raise ValueError(
+                "request-less results are limited to invalid input or unsupported jurisdiction"
+            )
+
         if result.request_reference != request.request_reference:
             raise ValueError("result request reference must match the bound request reference")
+        if result.status == "invalid_input":
+            raise ValueError("invalid input cannot be paired with a valid typed request")
 
         country_assignments = _covered_assignments(
             request.company_payroll_country_assignments,
@@ -485,6 +549,7 @@ class CanadianPayrollEvaluation(ContractModel):
                 or snapshot.effective_to < request.pay_period.end_date
             ):
                 raise ValueError("jurisdiction snapshot must cover the complete request period")
+            self._validate_employer_outputs(request, result)
             return self
 
         if required_blockers:
@@ -494,3 +559,39 @@ class CanadianPayrollEvaluation(ContractModel):
             if missing:
                 raise ValueError("blocked result must include the request's required block reason")
         return self
+
+    @staticmethod
+    def _validate_employer_outputs(request, result):
+        decisions = {
+            decision.requirement: decision
+            for decision in request.employer_configuration_references.applicability_decisions
+        }
+        output_groups = {
+            "employer_levy": result.approved_employer_levies,
+            "workers_compensation": result.approved_workers_compensation,
+        }
+        for requirement, outputs in output_groups.items():
+            decision = decisions[requirement]
+            if decision.decision == "reviewed_not_applicable":
+                if outputs:
+                    raise ValueError(
+                        f"reviewed not-applicable {requirement} must not have an output"
+                    )
+                continue
+
+            configuration = decision.employer_configuration_snapshot
+            if configuration is None:
+                raise ValueError(f"applicable {requirement} has no reviewed configuration")
+            for output in outputs:
+                if (
+                    output.employer_configuration_reference
+                    != configuration.employer_configuration_reference
+                    or output.employer_configuration_snapshot_reference
+                    != configuration.snapshot_reference
+                ):
+                    raise ValueError(
+                        f"{requirement} output must reference the request's exact configuration snapshot"
+                    )
+            if not outputs:
+                label = "employer levy" if requirement == "employer_levy" else "workers compensation"
+                raise ValueError(f"applicable {label} requires a calculated output")
