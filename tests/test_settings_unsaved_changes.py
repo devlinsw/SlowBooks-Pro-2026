@@ -96,7 +96,8 @@ def test_saving_marks_the_page_clean_and_the_page_is_watched():
         "SettingsPage._markClean()"
     )
     assert 'oninput="SettingsPage._updateDirty()"' in JS
-    render_hooks = JS[: JS.index("return `")]
+    render = JS[JS.index("async render() {") : JS.index("async uploadLogo(input) {")]
+    render_hooks = render[: render.index("return `")]
     assert "SettingsPage._installLeaveGuard();" in render_hooks
     assert "SettingsPage._markClean();" in render_hooks
 

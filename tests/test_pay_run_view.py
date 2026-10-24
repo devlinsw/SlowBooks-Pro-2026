@@ -40,9 +40,9 @@ def _reconciles(row):
     return total == _money(row["Net"])
 
 
-def _probe_rows():
+def _probe_rows(status="processed"):
     out = subprocess.run(
-        ["node", str(ROOT / "tests" / "js" / "pay_run_view_probe.js")],
+        ["node", str(ROOT / "tests" / "js" / "pay_run_view_probe.js"), status],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -67,11 +67,21 @@ def test_each_stub_pdf_button_says_whose_stub_it_is():
     assert [r["Employee"] for r in rows] == names
     # the words on the button and the name a screen reader reads out
     assert [r["Stub"] for r in rows] == [f"Stub PDF — {n}" for n in names]
+    assert [r["_stub_button"] for r in rows] == [True, True]
     assert [r["_stub_label"] for r in rows] == [f"Stub PDF — {n}" for n in names]
     # a wide dialog, a table that scrolls sideways, an Employee column that stays
     assert all(r["_wide"] for r in rows)
     assert rows[0]["_container"] == "table-container table-container--scroll"
     assert rows[0]["_table"] == "pay-run-table"
+
+
+@pytest.mark.parametrize("status", ["draft", "void"])
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_unprocessed_pay_runs_do_not_offer_stub_pdfs(status):
+    rows = _probe_rows(status)
+    assert [r["Stub"] for r in rows] == ["—", "—"]
+    assert [r["_stub_button"] for r in rows] == [False, False]
+    assert [r["_stub_label"] for r in rows] == [None, None]
 
 
 def test_the_employee_column_stays_in_view_when_the_table_scrolls():

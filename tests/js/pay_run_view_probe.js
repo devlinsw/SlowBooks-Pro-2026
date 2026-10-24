@@ -7,7 +7,7 @@ const fs = require('fs'), vm = require('vm');
 let modal = '';
 let modalOpts = null;
 const run = {
-  id: 3, period_start: '2026-09-13', period_end: '2026-09-26', status: 'draft',
+  id: 3, period_start: '2026-09-13', period_end: '2026-09-26', status: process.argv[2] || 'processed',
   total_gross: 2166.67, total_taxes: 404.06, total_employer_taxes: 0, total_employer_benefits: 0, total_net: 1762.61,
   stubs: [{
     id: 9, employee_id: 2, employee_name: 'Lena Hart', hours: 0, gross_pay: 2166.67,
@@ -33,10 +33,13 @@ vm.runInContext(fs.readFileSync('app/static/js/payroll.js', 'utf8') + '\nthis.P 
   const heads = [...modal.matchAll(/<th scope="col"[^>]*>([^<]*)<\/th>/g)].map((m) => m[1].trim());
   const body = modal.slice(modal.indexOf('<tbody>'), modal.indexOf('</tbody>'));
   for (const tr of body.split('<tr>').slice(1)) {
-    const cells = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => stripTags(m[1]).trim());
+    const rawCells = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
+    const cells = rawCells.map((cell) => stripTags(cell).trim());
     const row = Object.fromEntries(heads.map((h, i) => [h, cells[i]]));
     // how the Stub PDF button is named, and how the table is laid out
-    row._stub_label = (tr.match(/<button[^>]*aria-label="([^"]*)"/) || [])[1] || null;
+    const stubCell = rawCells[heads.indexOf('Stub')] || '';
+    row._stub_button = /<button\b/i.test(stubCell);
+    row._stub_label = (stubCell.match(/<button[^>]*aria-label="([^"]*)"/) || [])[1] || null;
     const layout = modal.match(/<div class="(table-container[^"]*)"><table(?: class="([^"]*)")?>/) || [];
     row._container = layout[1] || null;
     row._table = layout[2] || null;

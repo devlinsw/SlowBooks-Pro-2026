@@ -279,6 +279,10 @@ _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/payroll/gross-up"),
     ("POST", "/api/payroll/{run_id}/nacha"),
     ("POST", "/api/time-entries/classify"),
+    # The per-employee province editor is explicitly not implemented yet;
+    # these safe configuration APIs intentionally have no SPA caller for now.
+    ("GET", "/api/settings/payroll-jurisdiction/employees/{employee_id}"),
+    ("POST", "/api/settings/payroll-jurisdiction/employees/{employee_id}"),
     # Legacy: superseded by /api/payroll/forms/* — kept until next major release.
     # Migration tracker in docs/todo.md. (The 1099 summary, the 1099-NEC and
     # the 1096 have screen callers now, on the Tax Forms page.)
