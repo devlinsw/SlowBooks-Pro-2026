@@ -546,6 +546,8 @@ class CalculatedPayrollResult(ContractModel):
             provenances.append(component.provenance)
 
         for snapshot in self.rule_snapshots:
+            if snapshot.effective_pay_date != self.pay_period.pay_date:
+                raise ValueError("rule snapshot pay date must match the result pay date")
             for source_snapshot in snapshot.source_snapshots:
                 _require_effective_window_coverage(
                     source_snapshot.effective_from,
@@ -555,6 +557,7 @@ class CalculatedPayrollResult(ContractModel):
                     "source snapshot",
                 )
 
+        referenced_snapshot_references = set()
         for provenance in provenances:
             snapshot = snapshots_by_reference.get(provenance.rule_snapshot_reference)
             if snapshot is None:
@@ -576,8 +579,12 @@ class CalculatedPayrollResult(ContractModel):
                 raise ValueError(
                     "component source snapshots must match sources on its exact rule snapshot"
                 )
-            if snapshot.effective_pay_date != self.pay_period.pay_date:
-                raise ValueError("rule snapshot pay date must match the result pay date")
+            referenced_snapshot_references.add(snapshot.snapshot_reference)
+
+        if referenced_snapshot_references != set(snapshots_by_reference):
+            raise ValueError(
+                "every included rule snapshot must be referenced by component provenance"
+            )
         return self
 
 

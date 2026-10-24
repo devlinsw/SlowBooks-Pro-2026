@@ -473,6 +473,26 @@ def _snapshot_test_rule(**overrides):
     return contract.RuleSnapshot(**values)
 
 
+def _snapshot_test_orphan_rule(*, effective_pay_date):
+    return _snapshot_test_rule(
+        rule_bundle_reference="orphan-rule-bundle",
+        snapshot_reference="orphan-rule-snapshot",
+        version_reference="orphan-rule-version",
+        content_digest="orphan-rule-digest",
+        effective_pay_date=effective_pay_date,
+        qualified_review_attestation_reference="orphan-rule-review",
+        reviewer_qualification_reference="orphan-rule-qualification",
+        source_snapshots=(
+            _snapshot_test_source(
+                source_reference="orphan-source",
+                snapshot_reference="orphan-source-snapshot",
+                version_reference="orphan-source-version",
+                content_digest="orphan-source-digest",
+            ),
+        ),
+    )
+
+
 def _structural_calculated_result(**overrides):
     # Zero strings only satisfy required shape fields; no amount is an oracle.
     provenance = _snapshot_test_provenance()
@@ -720,6 +740,44 @@ def test_request_result_binding_blocks_cross_province_and_federal_calculations()
     )
     paired_federal_block = evaluation(request=federal_request, result=federal_blocked)
     assert not hasattr(paired_federal_block.result, "totals")
+
+
+def test_calculated_result_rejects_unreferenced_rule_snapshot_with_stale_pay_date():
+    request = make_request()
+    base_result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+    )
+    result_payload = base_result.model_dump()
+    result_payload["rule_snapshots"] = (
+        *base_result.rule_snapshots,
+        _snapshot_test_orphan_rule(effective_pay_date=date(1900, 1, 1)),
+    )
+
+    with pytest.raises(ValidationError, match="rule snapshot pay date"):
+        contract.CanadianPayrollEvaluation.model_validate(
+            {"request": request, "result": result_payload}
+        )
+
+
+def test_calculated_result_rejects_unreferenced_rule_snapshot_with_valid_pay_date():
+    request = make_request()
+    base_result = _structural_calculated_result(
+        request_reference=request.request_reference,
+        employee_reference=request.employee_reference,
+        pay_period=request.pay_period,
+    )
+    result_payload = base_result.model_dump()
+    result_payload["rule_snapshots"] = (
+        *base_result.rule_snapshots,
+        _snapshot_test_orphan_rule(effective_pay_date=date(2026, 5, 12)),
+    )
+
+    with pytest.raises(ValidationError, match="must be referenced by component provenance"):
+        contract.CanadianPayrollEvaluation.model_validate(
+            {"request": request, "result": result_payload}
+        )
 
 
 def test_component_provenance_binds_exact_rule_and_source_snapshots():
